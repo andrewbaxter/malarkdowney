@@ -5,6 +5,7 @@ use {
             console,
             console_dbg,
         },
+        timers::callback::Timeout,
         utils::{
             document,
             document_element,
@@ -17,9 +18,18 @@ use {
         el_from_raw,
         set_root,
     },
-    std::borrow::Cow,
+    std::{
+        borrow::Cow,
+        cell::RefCell,
+        collections::HashSet,
+        rc::Rc,
+    },
     wasm_bindgen::{
         closure::Closure,
+        convert::{
+            IntoWasmAbi,
+            ReturnWasmAbi,
+        },
         JsCast,
         JsValue,
     },
@@ -176,9 +186,6 @@ fn get_padding_left(e: &HtmlElement) -> f32 {
 fn set_alignments_to_value(indent_block: HtmlElement, aligned: &Vec<HtmlElement>, width: f32) {
     // Update widths
     indent_block.style().set_property("padding-left", &format!("{}px", width)).unwrap();
-    for e in aligned {
-        e.style().set_property("width", &format!("{}px", width)).unwrap();
-    }
 
     // Recursively update alignments for child lines
     let root = {
@@ -192,7 +199,7 @@ fn set_alignments_to_value(indent_block: HtmlElement, aligned: &Vec<HtmlElement>
     };
 
     fn recurse(root: &HtmlElement, indent_block: &HtmlElement, aligned: Option<&Vec<HtmlElement>>) {
-        let left = indent_block.client_left() as f32 - root.client_left() as f32;
+        let right = indent_block.client_left() as f32 + get_padding_left(indent_block) - root.client_left() as f32;
         let aligned = match aligned {
             Some(a) => Cow::Borrowed(a),
             None => {
@@ -202,7 +209,7 @@ fn set_alignments_to_value(indent_block: HtmlElement, aligned: &Vec<HtmlElement>
         };
         for e in aligned.as_ref() {
             let style = e.style();
-            style.set_property("left", &format!("{}px", left)).unwrap();
+            style.set_property("left", &format!("{}px", right)).unwrap();
         }
         let children = indent_block.children();
         for i in 0 .. children.length() {
@@ -227,8 +234,9 @@ macro_rules! eprintln{
 fn get_aligned_max_width(aligned: &Vec<HtmlElement>) -> f32 {
     let mut max_width = 0.;
     for e in aligned {
+        // Get inner text that actually has width
+        let e = e.first_element_child().unwrap();
         let width = e.client_width() as f32;
-        eprintln!("aligned width {}", width);
         if width > max_width {
             max_width = width;
         }
@@ -245,57 +253,106 @@ fn main() {
 
     // Setup change handler
     e_root.ref_own(|self1| {
-        let observer = MutationObserver::new(&Closure::<dyn Fn(Array) -> ()>::new(move |mutations: Array| {
-            for m in mutations {
-                let m = MutationRecord::from(m);
-                match m.type_().as_str() {
-                    "childList" => {
-                        // Elements created/deleted - we only care about creations (line breaks) since
-                        // there are new lines that need to be set up.
-                        let block = JsValue::from(m.target().unwrap()).dyn_into::<Element>().unwrap();
-                    },
-                    "characterData" => {
-                        let mut at =
-                            JsValue::from(m.target().unwrap())
-                                .dyn_into::<CharacterData>()
-                                .unwrap()
-                                .parent_node()
-                                .unwrap()
-                                .dyn_into::<HtmlElement>()
-                                .unwrap();
-                        let mut at_class_list = at.class_list();
-                        loop {
-                            if at_class_list.contains(CLASS_LINE) {
-                                break;
+        let observer = MutationObserver::new(&Closure::<dyn Fn(Array) -> ()>::new({
+            enum Change {
+                Add(HtmlElement),
+                Delete(HtmlElement),
+                Text(HtmlElement),
+            }
+
+            struct DelayState {
+                delay: Option<Timeout>,
+                changes: Vec<Change>,
+            }
+
+            let delay = Rc::new(RefCell::new(DelayState {
+                delay: None,
+                changes: vec![],
+            }));
+            move |mutations: Array| {
+                for m in mutations {
+                    let m = MutationRecord::from(m);
+                    let mut delay_mut = delay.borrow_mut();
+                    match m.type_().as_str() {
+                        "childList" => {
+                            let removed = m.removed_nodes();
+                            for i in 0 .. removed.length() {
+                                delay_mut
+                                    .changes
+                                    .push(Change::Delete(removed.item(i).unwrap().dyn_into().unwrap()));
                             }
-                            at = at.parent_element().unwrap().dyn_into().unwrap();
-                            at_class_list = at.class_list();
-                        }
-                        if at_class_list.contains(CLASS_ALIGNED) {
-                            // Sync alignments due to indentation changes (line removed, line added with
-                            // larger number)
-                            let id = usize::from_str_radix(&at.get_attribute(ATTR_INDENT_ID).unwrap(), 10).unwrap();
-                            let indent_block = get_indent_block(id);
-                            let width = indent_block.client_width() as f32;
-                            let set_width = get_padding_left(&indent_block);
-                            if width > set_width {
-                                set_alignments_to_value(indent_block, &get_aligned(id), width);
-                            } else if width < set_width * 0.2 {
-                                let aligned = get_aligned(id);
-                                let max_width = get_aligned_max_width(&aligned);
-                                if max_width < set_width * 0.9 {
-                                    set_alignments_to_value(indent_block, &aligned, max_width);
+                            let added = m.added_nodes();
+                            for i in 0 .. added.length() {
+                                delay_mut.changes.push(Change::Add(added.item(i).unwrap().dyn_into().unwrap()));
+                            }
+                        },
+                        "characterData" => {
+                            delay_mut
+                                .changes
+                                .push(
+                                    Change::Text(
+                                        JsValue::from(m.target().unwrap())
+                                            .dyn_into::<CharacterData>()
+                                            .unwrap()
+                                            .parent_node()
+                                            .unwrap()
+                                            .dyn_into::<HtmlElement>()
+                                            .unwrap(),
+                                    ),
+                                );
+                        },
+                        _ => panic!(),
+                    }
+                    delay_mut.delay = Some(Timeout::new(200, {
+                        let delay = delay.clone();
+                        move || {
+                            let mut delay_mut = delay.borrow_mut();
+                            delay_mut.delay = None;
+                            let changes = delay_mut.changes.split_off(0);
+                            drop(delay_mut);
+                            let mut seen_text = HashSet::new();
+                            for change in changes {
+                                match change {
+                                    Change::Add(e) => { },
+                                    Change::Delete(e) => { },
+                                    Change::Text(e) => {
+                                        if !seen_text.insert(JsValue::from(e.clone()).as_ref().into_abi()) {
+                                            continue;
+                                        }
+                                        let mut at = e;
+                                        let mut at_class_list = at.class_list();
+                                        loop {
+                                            if at_class_list.contains(CLASS_ALIGNED) {
+                                                // Sync alignments due to indentation changes (line removed, line added with
+                                                // larger number)
+                                                let id = usize::from_str_radix(&at.get_attribute(ATTR_INDENT_ID).unwrap(), 10).unwrap();
+                                                let indent_block = get_indent_block(id);
+                                                let width = at.first_element_child().unwrap().client_width() as f32;
+                                                let set_width = get_padding_left(&indent_block);
+                                                if width > set_width {
+                                                    set_alignments_to_value(indent_block, &get_aligned(id), width);
+                                                } else if width < set_width * 0.2 {
+                                                    let aligned = get_aligned(id);
+                                                    let max_width = get_aligned_max_width(&aligned);
+                                                    if max_width < set_width * 0.9 {
+                                                        set_alignments_to_value(indent_block, &aligned, max_width);
+                                                    }
+                                                }
+                                                break;
+                                            } else if at_class_list.contains(CLASS_LINE) {
+                                                // Markdown changed - replace line, modify document structure, sync line contents
+                                                break;
+                                            } else {
+                                                at = at.parent_element().unwrap().dyn_into().unwrap();
+                                                at_class_list = at.class_list();
+                                            }
+                                        }
+                                    },
                                 }
                             }
-                        } else if at_class_list.contains(CLASS_LINE) {
-                            // Markdown changed - replace line, modify document structure, sync line contents
-                        } else {
-                            unreachable!();
                         }
-                    },
-                    _ => panic!(),
+                    }));
                 }
-                m.target().unwrap();
             }
         }).into_js_value().into()).unwrap();
         observer.observe_with_options(&self1.raw(), &{
@@ -345,13 +402,8 @@ fn main() {
                     e_line.class_list().add_1(CLASS_LINE).unwrap();
                     let mut children = vec![];
                     for alignment in &mut ctx.alignments {
-                        let e_alignment = create_element("span");
-                        e_alignment
-                            .class_list()
-                            .add_2(CLASS_ALIGNED, &class_aligned(alignment.source_indent))
-                            .unwrap();
-                        e_alignment.set_attribute(ATTR_INDENT_ID, &alignment.source_indent.to_string()).unwrap();
-                        e_alignment.set_text_content(
+                        let e_aligned = create_element("span");
+                        e_aligned.set_text_content(
                             Some(
                                 alignment
                                     .first_text
@@ -363,7 +415,14 @@ fn main() {
                         );
                         let observe_opts = MutationObserverInit::new();
                         observe_opts.set_character_data(true);
-                        children.push(Node::from(e_alignment));
+                        let e_aligned_outer = create_element("span");
+                        e_aligned_outer
+                            .class_list()
+                            .add_2(CLASS_ALIGNED, &class_aligned(alignment.source_indent))
+                            .unwrap();
+                        e_aligned_outer.set_attribute(ATTR_INDENT_ID, &alignment.source_indent.to_string()).unwrap();
+                        e_aligned_outer.append_child(&e_aligned).unwrap();
+                        children.push(Node::from(e_aligned_outer));
                     }
                     for span in block {
                         children.push(generate_inline(span));
@@ -462,8 +521,9 @@ fn main() {
         for id in 0 .. ctx.ids {
             let aligned = get_aligned(id);
             let max_width = get_aligned_max_width(&aligned);
-            eprintln!("initial align; id {}, aligned count {}, max_width {}", id, aligned.len(), max_width);
             let indent_block = get_indent_block(id);
+
+            //. eprintln!("initial alignment; id {}, aligned count {}, max_width {}", id, aligned.len(), max_width);
             set_alignments_to_value(indent_block, &aligned, max_width);
         }
     }
