@@ -1,35 +1,43 @@
+Inline: InlineEl*;
+InlineEl: prefix=StrongDelim children=Inline suffix=StrongDelim? {Strong, 11, left}
+        | prefix=EmphasisDelim children=Inline suffix=EmphasisDelim? {Emphasis, 11, left} 
+        | title_prefix=LinkTitlePrefix title=Inline continuation=Link1? {Link , 11, left}
+        | prefix=CodeDelim text=CodeChar* suffix=CodeDelim? {Code, 11, left} 
+        | text=TextChar+ {Text, 9, left};
+
+StrongDelim: StrongT;
+
+EmphasisDelim: EmphasisT;
+
+LinkTitlePrefix: LinkTitlePrefixT;
+LinkTitleSuffix: LinkTitleSuffixT;
+LinkAddressPrefix: LinkAddressPrefixT;
+LinkAddressSuffix: LinkAddressSuffixT;
+Link1: title_suffix=LinkTitleSuffix address=LinkAddress?;
+LinkAddress: prefix=LinkAddressPrefix address=LinkAddressChar* suffix=LinkAddressSuffix?;
+LinkAddressChar: LinkAddressCharT | EscapedChar;
+
+CodeDelim: CodeDelimT;
+CodeChar: CodeCharT | EscapedChar;
+
+TextChar: TextCharT | EscapedChar;
+
+EscapeChar: EscapeT;
+EscapedChar: prefix=EscapeChar text=AnyCharT;
+
 Layout: Empty;
-
-EscapedText: EscapeT AnyTextT;
-Children: Inline*;
-
-Inline: Strong | Emphasis | Link | Code | Text;
-
-Strong: StrongT children=Children complete=StrongT?;
-
-Emphasis: EmphasisT children=Children complete=EmphasisT?;
-
-Link: LinkStartT title=Children complete=Link1?;
-Link1: LinkInfixT complete=Link2?;
-Link2: address=LinkAddressText complete=Link3?;
-Link3: LinkEndT;
-LinkAddressText: LinkAddressTextT | EscapedText;
-
-Code: CodeT text=CodeText CodeT;
-CodeText: CodeTextT | EscapedText;
-
-Text: TextT | EscapedText;
 
 terminals
 Empty: "";
 EscapeT: "\\";
-AnyTextT: /./;
-TextT: /[^*_`\\]/;
-CodeT: "`";
-CodeTextT: /[^`\\]/;
-LinkStartT: "[";
-LinkInfixT: "](";
-LinkEndT: ")";
-LinkAddressTextT: /[^)\\]/;
+AnyCharT: /./;
+TextCharT: /[^*_`\\]/;
+CodeDelimT: "`";
+CodeCharT: /[^`\\]/;
+LinkTitlePrefixT: "[";
+LinkTitleSuffixT: "](";
+LinkAddressPrefixT: "(";
+LinkAddressSuffixT: ")";
+LinkAddressCharT: /[^)\\]/;
 StrongT: "*";
 EmphasisT: "_";

@@ -12,6 +12,7 @@ fn main() {
     println!("cargo:rerun-if-changed={}", inline_grammar_path.to_string_lossy());
     let inline_out_dir = PathBuf::from(&env::var("OUT_DIR").unwrap()).join("inline");
     rustemo_compiler::Settings::new()
+        .parser_algo(rustemo_compiler::ParserAlgo::GLR)
         .out_dir_actions_root(inline_out_dir.clone())
         .out_dir_root(inline_out_dir)
         .process_grammar(&inline_grammar_path)

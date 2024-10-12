@@ -17,6 +17,7 @@ use {
         el_from_raw,
         set_root,
     },
+    rustemo::Parser,
     serde::{
         Deserialize,
         Serialize,
@@ -31,7 +32,6 @@ use {
             HashMap,
             HashSet,
         },
-        mem::swap,
         rc::Rc,
         str::FromStr,
     },
@@ -56,11 +56,11 @@ use {
 };
 
 mod grammar {
-    mod inline {
+    pub(crate) mod inline {
         include!(concat!(env!("OUT_DIR"), "/inline/inline.rs"));
     }
 
-    mod inline_actions {
+    pub(crate) mod inline_actions {
         include!(concat!(env!("OUT_DIR"), "/inline/inline_actions.rs"));
     }
 }
@@ -120,11 +120,14 @@ pub struct InlineEmphasis {
 
 pub struct InlineLink {
     pub incomplete: bool,
-    // `[`
-    pub prefix: String,
+    // `[..]`
     pub title: Vec<Inline>,
-    // `](`
-    pub infix: String,
+    pub address: Option<InlineLinkAddress>,
+}
+
+pub struct InlineLinkAddress {
+    // `(`
+    pub prefix: String,
     pub address: String,
     // `)`
     pub suffix: String,
@@ -370,22 +373,23 @@ fn sync_line(
                     attrs: Default::default(),
                     children: {
                         let mut out = vec![];
-                        out.push(ShadowDom::Text(want.prefix));
                         for c in want.title {
                             out.push(generate_inline(c));
                         }
-                        out.push(ShadowDom::Text(want.infix));
-                        out.push(ShadowDom::Element(ShadowDomElement {
-                            tag: "a",
-                            classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
-                            attrs: {
-                                let mut out = HashMap::new();
-                                out.insert("href".to_string(), want.address.clone());
-                                out
-                            },
-                            children: vec![ShadowDom::Text(want.address)],
-                        }));
-                        out.push(ShadowDom::Text(want.suffix));
+                        if let Some(address) = want.address {
+                            out.push(ShadowDom::Element(ShadowDomElement {
+                                tag: "a",
+                                classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
+                                attrs: {
+                                    let mut out = HashMap::new();
+                                    out.insert("href".to_string(), address.address.clone());
+                                    out
+                                },
+                                children: vec![
+                                    ShadowDom::Text(format!("{}{}{}", address.prefix, address.address, address.suffix))
+                                ],
+                            }));
+                        }
                         out
                     },
                 });
@@ -926,189 +930,195 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
             }
 
             // Parse inline
-            type InlineTypeSig = fn(bool, Vec<Inline>) -> Inline;
+            let ast =
+                grammar::inline::InlineParser::new()
+                    .parse(&text)
+                    .unwrap()
+                    .get_first_tree()
+                    .unwrap()
+                    .build(&mut grammar::inline::DefaultBuilder::new())
+                    .unwrap_or_default();
 
-            struct StackEl {
-                child_type: InlineTypeSig,
-                inline: Vec<Inline>,
+            trait OriginalText {
+                fn orig_text(&self) -> String;
             }
 
-            struct InlineParseState {
-                // Text that's not yet a node
-                top_text: String,
-                // Node children that aren't yet an element
-                top_inline: Vec<Inline>,
-                // Parent WIP elements plus meta about the current top/child element
-                stack: Vec<StackEl>,
-            }
-
-            impl InlineParseState {
-                fn push_element(&mut self, type_: InlineTypeSig) {
-                    self.flush_text();
-                    self.stack.push(StackEl {
-                        child_type: type_,
-                        inline: self.top_inline.split_off(0),
-                    });
-                }
-
-                fn flush_element(&mut self, complete: bool) {
-                    self.flush_text();
-                    let parent = self.stack.pop().unwrap();
-                    let mut inline = parent.inline;
-                    swap(&mut inline, &mut self.top_inline);
-                    self.top_inline.push((parent.child_type)(complete, inline));
-                }
-
-                fn flush_text(&mut self) {
-                    if self.top_text.is_empty() {
-                        return;
-                    }
-                    let mut text = String::new();
-                    swap(&mut text, &mut self.top_text);
-                    self.top_inline.push(Inline::Text(text));
-                }
-
-                fn top_type(&self) -> Option<InlineTypeSig> {
-                    let Some(parent) = self.stack.last() else {
-                        return None;
-                    };
-                    return Some(parent.child_type);
+            impl OriginalText for grammar::inline_actions::StrongDelim {
+                fn orig_text(&self) -> String {
+                    return "*".to_string();
                 }
             }
 
-            fn type_strong(complete: bool, children: Vec<Inline>) -> Inline {
-                return Inline::Strong(InlineStrong {
-                    incomplete: !complete,
-                    children: children,
-                });
-            }
-
-            fn type_emphasis(complete: bool, children: Vec<Inline>) -> Inline {
-                return Inline::Emphasis(InlineEmphasis {
-                    incomplete: !complete,
-                    children: children,
-                });
-            }
-
-            fn type_code(complete: bool, children: Vec<Inline>) -> Inline {
-                let mut iter = children.into_iter();
-                let Some(Inline::Text(child)) = iter.next() else {
-                    panic!();
-                };
-                if iter.next().is_some() {
-                    panic!();
+            impl OriginalText for grammar::inline_actions::EmphasisDelim {
+                fn orig_text(&self) -> String {
+                    return "_".to_string();
                 }
-                return Inline::Code(InlineCode {
-                    incomplete: !complete,
-                    text: child,
-                });
             }
 
-            let mut parse_state = InlineParseState {
-                top_inline: vec![],
-                top_text: "".to_string(),
-                stack: vec![],
-            };
-
-            enum Mode {
-                Normal,
-                // Start token repeats
-                Code(usize),
+            impl OriginalText for grammar::inline_actions::CodeDelim {
+                fn orig_text(&self) -> String {
+                    return "`".to_string();
+                }
             }
 
-            let mut mode = Mode::Normal;
-            let mut escape = false;
-            let mut iter = text.chars().enumerate();
-            loop {
-                let Some((i, c)) = iter.next() else {
-                    break;
-                };
-                match mode {
-                    Mode::Normal => {
-                        if escape {
-                            parse_state.top_text.push(c);
-                            escape = false;
-                        } else {
-                            match c {
-                                '*' => {
-                                    if parse_state.top_type() == Some(type_strong) {
-                                        parse_state.top_text.push(c);
-                                        parse_state.flush_element(true);
-                                    } else {
-                                        parse_state.push_element(type_strong);
-                                        parse_state.top_text.push(c);
-                                    }
-                                },
-                                '_' => {
-                                    if parse_state.top_type() == Some(type_emphasis) {
-                                        parse_state.top_text.push(c);
-                                        parse_state.flush_element(true);
-                                    } else {
-                                        parse_state.push_element(type_emphasis);
-                                        parse_state.top_text.push(c);
-                                    }
-                                },
-                                '`' => {
-                                    parse_state.push_element(type_code);
-                                    let mut count = 0;
-                                    for c in text.chars().skip(i) {
-                                        if c != '`' {
-                                            break;
+            impl OriginalText for grammar::inline_actions::LinkTitlePrefix {
+                fn orig_text(&self) -> String {
+                    return "[".to_string();
+                }
+            }
+
+            impl OriginalText for grammar::inline_actions::LinkTitleSuffix {
+                fn orig_text(&self) -> String {
+                    return "]".to_string();
+                }
+            }
+
+            impl OriginalText for grammar::inline_actions::LinkAddressPrefix {
+                fn orig_text(&self) -> String {
+                    return "(".to_string();
+                }
+            }
+
+            impl OriginalText for grammar::inline_actions::LinkAddressSuffix {
+                fn orig_text(&self) -> String {
+                    return ")".to_string();
+                }
+            }
+
+            impl OriginalText for grammar::inline_actions::EscapeChar {
+                fn orig_text(&self) -> String {
+                    return "\\".to_string();
+                }
+            }
+
+            fn translate_ast(e: grammar::inline_actions::InlineEl) -> Inline {
+                match e {
+                    grammar::inline_actions::InlineEl::Strong(e) => {
+                        return Inline::Strong(InlineStrong {
+                            incomplete: e.suffix.is_none(),
+                            children: {
+                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
+                                for c in e.children.unwrap_or_default() {
+                                    out.push(translate_ast(c));
+                                }
+                                if let Some(suffix) = e.suffix {
+                                    out.push(Inline::Text(suffix.orig_text()));
+                                }
+                                out
+                            },
+                        });
+                    },
+                    grammar::inline_actions::InlineEl::Emphasis(e) => {
+                        return Inline::Emphasis(InlineEmphasis {
+                            incomplete: e.suffix.is_none(),
+                            children: {
+                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
+                                for c in e.children.unwrap_or_default() {
+                                    out.push(translate_ast(c));
+                                }
+                                if let Some(suffix) = e.suffix {
+                                    out.push(Inline::Text(suffix.orig_text()));
+                                }
+                                out
+                            },
+                        });
+                    },
+                    grammar::inline_actions::InlineEl::Link(e) => {
+                        let mut title = vec![];
+                        title.push(Inline::Text(e.title_prefix.orig_text()));
+                        for c in e.title.unwrap_or_default() {
+                            title.push(translate_ast(c));
+                        }
+                        let mut address = None;
+                        let mut incomplete = false;
+                        shed!{
+                            let Some(cont) = e.continuation else {
+                                incomplete = true;
+                                break;
+                            };
+                            title.push(Inline::Text(cont.title_suffix.orig_text()));
+                            let Some(addr) = cont.address else {
+                                incomplete = true;
+                                break;
+                            };
+                            let addr_suffix = if let Some(suffix) = addr.suffix {
+                                suffix.orig_text()
+                            } else {
+                                incomplete = true;
+                                "".to_string()
+                            };
+                            address = Some(InlineLinkAddress {
+                                prefix: addr.prefix.orig_text(),
+                                address: {
+                                    let mut out = String::new();
+                                    for c in addr.address.unwrap_or_default() {
+                                        match c {
+                                            grammar::inline_actions::LinkAddressChar::LinkAddressCharT(
+                                                c,
+                                            ) => out.push_str(
+                                                &c,
+                                            ),
+                                            grammar::inline_actions::LinkAddressChar::EscapedChar(c) => {
+                                                out.push_str(&c.prefix.orig_text());
+                                                out.push_str(&c.text);
+                                            },
                                         }
-                                        parse_state.top_text.push(c);
-                                        count += 1;
                                     }
-                                    for _ in 0 .. count - 1 {
-                                        iter.next();
+                                    out
+                                },
+                                suffix: addr_suffix,
+                            });
+                        };
+                        return Inline::Link(InlineLink {
+                            incomplete: incomplete,
+                            title: title,
+                            address: address,
+                        });
+                    },
+                    grammar::inline_actions::InlineEl::Code(e) => {
+                        return Inline::Code(InlineCode {
+                            incomplete: e.suffix.is_none(),
+                            text: {
+                                let mut out = String::new();
+                                for c in e.text.unwrap_or_default() {
+                                    match c {
+                                        grammar::inline_actions::CodeChar::CodeCharT(c) => out.push_str(&c),
+                                        grammar::inline_actions::CodeChar::EscapedChar(c) => {
+                                            out.push_str(&c.prefix.orig_text());
+                                            out.push_str(&c.text);
+                                        },
                                     }
-                                    mode = Mode::Code(count);
-                                },
-                                '\\' => {
-                                    parse_state.top_text.push(c);
-                                    escape = true;
-                                },
-                                _ => {
-                                    parse_state.top_text.push(c);
+                                }
+                                out
+                            },
+                        });
+                    },
+                    grammar::inline_actions::InlineEl::Text(e) => {
+                        let mut out = String::new();
+                        for c in e.text {
+                            match c {
+                                grammar::inline_actions::TextChar::TextCharT(c) => out.push_str(&c),
+                                grammar::inline_actions::TextChar::EscapedChar(c) => {
+                                    out.push_str(&c.prefix.orig_text());
+                                    out.push_str(&c.text);
                                 },
                             }
                         }
-                    },
-                    Mode::Code(start_count) => {
-                        match c {
-                            '`' => {
-                                parse_state.top_text.push(c);
-                                let mut count = 0;
-                                for c in text.chars().skip(i) {
-                                    if c != '`' {
-                                        break;
-                                    }
-                                    count += 1;
-                                }
-                                if count >= start_count {
-                                    for _ in 0 .. start_count - 1 {
-                                        parse_state.top_text.push(iter.next().unwrap().1);
-                                    }
-                                    mode = Mode::Normal;
-                                    parse_state.flush_element(true);
-                                }
-                            },
-                            _ => {
-                                parse_state.top_text.push(c);
-                            },
-                        }
+                        return Inline::Text(out);
                     },
                 }
             }
-            while !parse_state.stack.is_empty() {
-                parse_state.flush_element(false);
+
+            let mut inline = vec![];
+            for e in ast {
+                inline.push(translate_ast(e));
             }
-            parse_state.flush_text();
             sync_line(
                 &at,
                 cursor,
                 line_type,
                 &mut indents.into_iter().map(|(_, x)| x).collect::<Vec<_>>(),
-                parse_state.top_inline,
+                inline,
             );
         }
 
