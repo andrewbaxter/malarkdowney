@@ -5,20 +5,13 @@ use {
         superif,
     },
     gloo::{
-        console::{
-            console,
-            console_dbg,
-        },
         timers::callback::Timeout,
         utils::{
             document,
-            document_element,
-            head,
             window,
         },
     },
     js_sys::Array,
-    regex::Regex,
     rooting::{
         el,
         el_from_raw,
@@ -34,25 +27,22 @@ use {
             Cell,
             RefCell,
         },
-        collections::HashSet,
+        collections::{
+            HashMap,
+            HashSet,
+        },
         mem::swap,
         rc::Rc,
         str::FromStr,
-        sync::LazyLock,
-        thread::panicking,
     },
     structre::structre,
     wasm_bindgen::{
         closure::Closure,
-        convert::{
-            IntoWasmAbi,
-            ReturnWasmAbi,
-        },
+        convert::IntoWasmAbi,
         JsCast,
         JsValue,
     },
     web_sys::{
-        console,
         CharacterData,
         Element,
         HtmlElement,
@@ -79,6 +69,7 @@ const CLASS_BLOCKCODE: &str = formatcp!("{}_blockcode", NAMESPACE);
 const CLASS_BLOCKQUOTE: &str = formatcp!("{}_blockquote", NAMESPACE);
 const CLASS_UL: &str = formatcp!("{}_ul", NAMESPACE);
 const CLASS_OL: &str = formatcp!("{}_ol", NAMESPACE);
+const CLASS_PSEUDO_A: &str = formatcp!("{}_pseudo_a", NAMESPACE);
 const PREFIX_UL_FIRST: &str = "* ";
 const PREFIX_UL: &str = "   ";
 const PREFIX_OL: &str = "  ";
@@ -119,8 +110,14 @@ pub struct InlineEmphasis {
 
 pub struct InlineLink {
     pub incomplete: bool,
+    // `[`
+    pub prefix: String,
     pub title: Vec<Inline>,
+    // `](`
+    pub infix: String,
     pub address: String,
+    // `)`
+    pub suffix: String,
 }
 
 pub struct InlineCode {
@@ -152,358 +149,278 @@ struct LineIndent {
     text: String,
 }
 
-fn replace(old: &Node, new: &Node) {
-    old.parent_node().unwrap().replace_child(old, new).unwrap();
+enum ShadowDom {
+    Text(String),
+    Element(ShadowDomElement),
 }
 
-fn create_element(t: &str) -> Element {
-    let out = document().create_element(t).unwrap();
-    out.class_list().add_1(CLASS_NAMESPACE).unwrap();
-    return out;
+struct ShadowDomElement {
+    tag: &'static str,
+    classes: HashSet<String>,
+    attrs: HashMap<String, String>,
+    children: Vec<ShadowDom>,
 }
 
-fn generate_inline(e: Inline) -> Node {
-    match e {
-        Inline::Text(e) => {
-            return Node::from(document().create_text_node(&e));
+fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &Node, want: ShadowDom) {
+    fn replace(old: &Node, new: &Node) {
+        old.parent_node().unwrap().replace_child(old, new).unwrap();
+    }
+
+    let mut sync_cursor = |node: &Node| {
+        if let Some(cursor) = cursor.take_if(|cursor| offset.get() < *cursor) {
+            let rel_offset = cursor - offset.get();
+            let sel = window().get_selection().unwrap().unwrap();
+            sel.remove_all_ranges().unwrap();
+            let range = document().create_range().unwrap();
+            range.set_start(node, rel_offset as u32).unwrap();
+            range.set_end(node, rel_offset as u32).unwrap();
+            sel.add_range(&range).unwrap();
+        }
+    };
+    match want {
+        ShadowDom::Text(want) => {
+            let have = match have.dyn_ref::<Text>() {
+                Some(have) => {
+                    if have.text_content().unwrap() != want {
+                        have.set_text_content(Some(&want));
+                    }
+                    have.clone()
+                },
+                None => {
+                    let new = document().create_text_node(&want);
+                    replace(have, &new);
+                    new
+                },
+            };
+            sync_cursor(&have);
+            offset.set(offset.get() + want.len());
         },
-        Inline::Strong(e) => {
-            let out = create_element("strong");
-            if e.incomplete {
-                out.class_list().add_1(CLASS_INCOMPLETE).unwrap();
+        ShadowDom::Element(want) => {
+            let have = superif!({
+                let Some(have) = have.dyn_ref::<Element>() else {
+                    break 'mismatch;
+                };
+                if have.tag_name() != want.tag {
+                    break 'mismatch;
+                }
+                break have.clone();
+            } 'mismatch {
+                let new = document().create_element(want.tag).unwrap();
+                replace(have, &new);
+                break new;
+            });
+
+            // Sync attrs
+            let have_attrs = have.get_attribute_names();
+            let mut remove_attrs = vec![];
+            for k in have_attrs {
+                let k = k.as_string().unwrap();
+                if !want.attrs.contains_key(&k) {
+                    remove_attrs.push(k);
+                }
             }
-            for e in e.children {
-                out.append_child(&generate_inline(e)).unwrap();
+            for k in remove_attrs {
+                have.remove_attribute(&k).unwrap();
             }
-            return Node::from(out);
-        },
-        Inline::Emphasis(e) => {
-            let out = create_element("emphasis");
-            if e.incomplete {
-                out.class_list().add_1(CLASS_INCOMPLETE).unwrap();
+            for (k, v) in want.attrs {
+                have.set_attribute(&k, &v).unwrap();
             }
-            for e in e.children {
-                out.append_child(&generate_inline(e)).unwrap();
+
+            // Sync classes
+            let classes = have.class_list();
+            let mut remove_classes = vec![];
+            for k in classes.entries() {
+                let k = k.unwrap().as_string().unwrap();
+                if !want.classes.contains(&k) {
+                    remove_classes.push(k);
+                }
             }
-            return Node::from(out);
-        },
-        Inline::Link(e) => {
-            let out = create_element("a");
-            if e.incomplete {
-                out.class_list().add_1(CLASS_INCOMPLETE).unwrap();
+            for k in remove_classes {
+                classes.remove_1(&k).unwrap();
             }
-            out.set_attribute("href", &e.address).unwrap();
-            for e in e.title {
-                out.append_child(&generate_inline(e)).unwrap();
+            for k in want.classes {
+                classes.add_1(&k).unwrap();
             }
-            return Node::from(out);
-        },
-        Inline::Code(e) => {
-            let out = create_element("code");
-            if e.incomplete {
-                out.class_list().add_1(CLASS_INCOMPLETE).unwrap();
+
+            // Sync children
+            let have_children = have.child_nodes();
+            let have_children_len = have_children.length() as usize;
+            let mut want_children_iter = want.children.into_iter();
+            let mut i = 0;
+            while i < have_children_len {
+                let Some(want_child) = want_children_iter.next() else {
+                    break;
+                };
+                let have_child = have_children.item(i as u32).unwrap();
+                sync_shadow_dom(cursor, offset, &have_child, want_child);
+                i += 1;
             }
-            out.set_text_content(Some(&e.text));
-            return Node::from(out);
+            for _ in i .. have_children_len {
+                have.remove_child(&have.last_child().unwrap()).unwrap();
+            }
+            for want_child in want_children_iter {
+                let new = match &want_child {
+                    ShadowDom::Text(want_child) => {
+                        document().create_text_node(&want_child).dyn_into::<Node>().unwrap()
+                    },
+                    ShadowDom::Element(want_child) => {
+                        document().create_element(&want_child.tag).unwrap().dyn_into::<Node>().unwrap()
+                    },
+                };
+                sync_shadow_dom(cursor, offset, &new, want_child);
+                have.append_child(&new).unwrap();
+            }
         },
     }
 }
 
 fn sync_line(
     line: &Element,
-    cursor: Option<usize>,
+    mut cursor: Option<usize>,
     line_type: LineType,
     indents: &mut [LineIndent],
     inlines: Vec<Inline>,
-) -> bool {
-    fn generate_aligned(indent: &LineIndent) -> Element {
-        let e_aligned = create_element("span");
-        let observe_opts = MutationObserverInit::new();
-        observe_opts.set_character_data(true);
-        let e_aligned_outer = create_element("span");
-        e_aligned_outer.class_list().add_2(CLASS_ALIGNED, &class_aligned(indent.source_indent)).unwrap();
-        e_aligned_outer.set_attribute(ATTR_INDENT_ID, &indent.source_indent.to_string()).unwrap();
-        e_aligned_outer.append_child(&e_aligned).unwrap();
-        return e_aligned_outer;
-    }
-
-    let mut line = line.clone();
-    match line_type {
-        LineType::Code => {
-            if line.tag_name() != "div" {
-                let line1 = generate_el_block_line(LineType::Code);
-                replace(&line, &line1);
-                line = line1;
-            }
-        },
-        LineType::Normal => {
-            if line.tag_name() != "p" {
-                let line1 = generate_el_block_line(LineType::Normal);
-                replace(&line, &line1);
-                line = line1;
-            }
-        },
-        LineType::Heading(n) => {
-            let want_tag = heading_el_name(n);
-            if line.tag_name() != want_tag {
-                let line1 = generate_el_block_line(LineType::Heading(n));
-                replace(&line, &line1);
-                line = line1;
-            }
-        },
-    }
-    let mut changed = false;
-    let have_children = line.child_nodes();
-    let have_children_len = have_children.length() as usize;
-    let mut want_indents_iter = indents.iter_mut();
-    let mut want_inlines_iter = inlines.iter();
-    let mut i = 0usize;
-    let mut offset = Cell::new(0usize);
-    let mut sync_sel = {
-        move |node: &Node| {
-            if let Some(cursor) = cursor.take_if(|cursor| offset.get() < *cursor) {
-                let rel_offset = cursor - offset.get();
-                let sel = window().get_selection().unwrap().unwrap();
-                sel.remove_all_ranges().unwrap();
-                let range = document().create_range().unwrap();
-                range.set_start(node, rel_offset as u32).unwrap();
-                range.set_end(node, rel_offset as u32).unwrap();
-                sel.add_range(&range);
-            }
-        }
-    };
-
-    // Sync existing aligneds
-    while i < have_children_len {
-        let have_child = have_children.item(i as u32).unwrap();
-        let Some(want_indent) = want_indents_iter.next() else {
-            break;
-        };
-
-        // Check element structure, replace if bad
-        let have_aligned_outer = superif!({
-            let Ok(have_child) = have_child.dyn_into::<Element>() else {
-                break 'mismatch;
-            };
-            if have_child.tag_name() != "span" {
-                break 'mismatch;
-            }
-            if !have_child.class_list().contains(CLASS_ALIGNED) {
-                break 'mismatch;
-            }
-            break have_child;
-        } 'mismatch {
-            changed = true;
-            let new_child = generate_aligned(want_indent);
-            replace(&have_child, &new_child);
-            break new_child;
-        });
-
-        // Check element contents, replace if bad
-        let want_text = want_indent.first_text.take().unwrap_or_else(|| want_indent.text.clone());
-        let have_aligned_inner = have_aligned_outer.first_element_child().unwrap();
-        if let Some(text) = have_aligned_inner.text_content() {
-            if text != want_text {
-                changed = true;
-                have_aligned_inner.set_text_content(Some(&want_text));
-                sync_sel(&have_aligned_inner);
-            }
-        }
-
-        // Advance
-        offset.set(offset.get() + want_text.len());
-        i += 1;
-    }
-
-    // Sync existing inlines
-    fn generate_remaining_inline(
-        parent: &Node,
-        changed: &mut bool,
-        offset: &Cell<usize>,
-        mut want_inlines_iter: std::slice::Iter<Inline>,
-        sync_sel: &mut dyn FnMut(&Node),
-    ) {
-        while let Some(want_inline) = want_inlines_iter.next() {
-            // TODO
-        }
-    }
-
-    fn sync_existing_inline(
-        parent: &Node,
-        changed: &mut bool,
-        offset: &Cell<usize>,
-        i: &mut usize,
-        want_inlines_iter: &mut std::slice::Iter<Inline>,
-        sync_sel: &mut dyn FnMut(&Node),
-    ) {
-        let have_children = parent.child_nodes();
-        let have_children_len = have_children.length() as usize;
-        while *i < have_children_len {
-            let have_inline = have_children.item(*i as u32).unwrap();
-            let Some(want_inline) = want_inlines_iter.next() else {
-                break;
-            };
-            match want_inline {
-                Inline::Text(want_inline) => {
-                    // Check element structure, replace if bad
-                    let have_inline = match have_inline.dyn_into::<Text>() {
-                        Ok(t) => t,
-                        Err(_) => {
-                            *changed = true;
-                            let new_inline = create_inline_text();
-                            replace(&have_inline, &new_inline);
-                            new_inline
-                        },
-                    };
-                    let have_text = have_inline.dyn_into::<Text>().unwrap();
-
-                    // Check element contents, replace if bad
-                    if have_text.text_content().unwrap() != have_text {
-                        have_text.set_text_content(Some(&want_inline));
-                        sync_sel(&have_text);
-                    }
-
-                    // Advance
-                    offset.set(offset.get() + want_inline.len());
-                },
-                Inline::Strong(want_inline) => {
-                    // Check element structure, replace if bad
-                    let have_inline = superif!({
-                        let Ok(have_inline) = have_inline.dyn_into::<Element>() else {
-                            break 'mismatch;
-                        };
-                        if have_inline.tag_name() != "strong" {
-                            break 'mismatch;
-                        }
-                        break have_inline;
-                    } 'mismatch {
-                        *changed = true;
-                        let new_inline = create_inline_strong();
-                        replace(&have_inline, &new_inline);
-                        break new_inline;
-                    });
-
-                    // Sync element contents
-                    have_inline.class_list().toggle_with_force(CLASS_INCOMPLETE, want_inline.incomplete);
-                    let mut j = 0usize;
-                    let mut want_children_iter = want_inline.children.iter();
-                    sync_existing_inline(parent, changed, offset, &mut j, &mut want_children_iter, sync_sel);
-                    generate_remaining_inline(parent, changed, offset, j, want_children_iter);
-                },
-                Inline::Emphasis(want_inline) => {
-                    // Check element structure, replace if bad
-                    let have_inline = superif!({
-                        let Ok(have_inline) = have_inline.dyn_into::<Element>() else {
-                            break 'mismatch;
-                        };
-                        if have_inline.tag_name() != "em" {
-                            break 'mismatch;
-                        }
-                        break have_inline;
-                    } 'mismatch {
-                        *changed = true;
-                        let new_inline = create_inline_emphasis();
-                        replace(&have_inline, &new_inline);
-                        break new_inline;
-                    });
-
-                    // Sync element contents
-                    have_inline.class_list().toggle_with_force(CLASS_INCOMPLETE, want_inline.incomplete);
-                    let mut j = 0usize;
-                    let mut want_children_iter = want_inline.children.iter();
-                    sync_existing_inline(parent, changed, offset, &mut j, &mut want_children_iter, sync_sel);
-                    generate_remaining_inline(parent, changed, offset, j, want_children_iter);
-                },
-                Inline::Link(want_inline) => {
-                    // Check element structure, replace if bad
-                    let have_inline = superif!({
-                        let Ok(have_inline) = have_inline.dyn_into::<Element>() else {
-                            break 'mismatch;
-                        };
-                        if have_inline.tag_name() != "a" {
-                            break 'mismatch;
-                        }
-                        break have_inline;
-                    } 'mismatch {
-                        *changed = true;
-                        let new_inline = create_inline_strong();
-                        replace(&have_inline, &new_inline);
-                        break new_inline;
-                    });
-
-                    // Sync element contents
-                    have_inline.class_list().toggle_with_force(CLASS_INCOMPLETE, want_inline.incomplete);
-                    let mut j = 0usize;
-                    let mut want_children_iter = want_inline.children.iter();
-                    sync_existing_inline(parent, changed, offset, &mut j, &mut want_children_iter, sync_sel);
-                    generate_remaining_inline(parent, changed, offset, j, want_children_iter);
-                },
-                Inline::Code(want_inline) => { },
-            }
-
-            // Advance
-            *i += 1;
-        }
-    }
-
-    sync_existing_inline(&line, &mut changed, &mut offset, &mut i, &mut want_inlines_iter, &mut sync_sel);
-
-    // Delete excess existing elements
-    for j in i .. have_children_len {
-        line.last_element_child().unwrap().remove();
-    }
-
-    // Create missing aligneds
-    while let Some(want_indent) = want_indents_iter.next() {
-        let new_aligned = generate_aligned(want_indent);
-        let new_aligned_inner = new_aligned.first_element_child().unwrap();
-        new_aligned_inner.set_text_content(
-            Some(want_indent.first_text.take().map(|x| x.as_str()).unwrap_or(&want_indent.text)),
-        );
-        line.append_child(&new_aligned).unwrap();
-    }
-
-    // Create missing inlines
-    while let Some(want_inline) = want_inlines_iter.next() {
-        // TODO
-    }
-
-    // x
-    for i in 0 .. usize::min(have_children.length() as usize, indents.len()) {
-        let want_indent = want_indents_iter.next().unwrap();
-        let have_indent_el = have_children.item(i as u32).unwrap();
-    }
-    for i in have_at.children_elements() .. want_at_len() {
-        have_at.append_child(generate_inline(x));
-    }
-    while have_at.children_elements() > want_at.len() {
-        have_at.last_element().unwrap().remove();
-    }
-    match (line_type, line.tag_name().as_str()) {
-        (LineType::Normal, "p") => (),
-        (LineType::Heading(1), "h1") => (),
-        (LineType::Heading(2), "h2") => (),
-        (LineType::Heading(3), "h3") => (),
-        (LineType::Heading(4), "h4") => (),
-        (LineType::Heading(5), "h5") => (),
-        (LineType::Heading(6), "h6") => (),
-    }
-    let mut children = vec![];
+) {
+    let mut want_children = vec![];
     for indent in indents {
-        let e_aligned = create_element("span");
-        e_aligned.set_text_content(Some(indent_data.clone()));
-        let observe_opts = MutationObserverInit::new();
-        observe_opts.set_character_data(true);
-        let e_aligned_outer = create_element("span");
-        e_aligned_outer.class_list().add_2(CLASS_ALIGNED, &class_aligned(indent.source_indent)).unwrap();
-        e_aligned_outer.set_attribute(ATTR_INDENT_ID, &indent.source_indent.to_string()).unwrap();
-        e_aligned_outer.append_child(&e_aligned).unwrap();
-        children.push(Node::from(e_aligned_outer));
+        want_children.push(ShadowDom::Element(ShadowDomElement {
+            tag: "span",
+            classes: [CLASS_NAMESPACE.to_string(), CLASS_ALIGNED.to_string(), class_aligned(indent.source_indent)]
+                .into_iter()
+                .collect(),
+            attrs: [(ATTR_INDENT_ID.to_string(), indent.source_indent.to_string())].into_iter().collect(),
+            children: vec![ShadowDom::Element(ShadowDomElement {
+                tag: "span",
+                classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
+                attrs: Default::default(),
+                children: vec![ShadowDom::Text(indent.first_text.take().unwrap_or_else(|| indent.text.clone()))],
+            })],
+        }));
     }
+
+    fn generate_inline(want: Inline) -> ShadowDom {
+        match want {
+            Inline::Text(want) => {
+                return ShadowDom::Text(want);
+            },
+            Inline::Strong(want) => {
+                return ShadowDom::Element(ShadowDomElement {
+                    tag: "strong",
+                    classes: {
+                        let mut out = HashSet::new();
+                        out.insert(CLASS_NAMESPACE.to_string());
+                        if want.incomplete {
+                            out.insert(CLASS_INCOMPLETE.to_string());
+                        }
+                        out
+                    },
+                    attrs: Default::default(),
+                    children: {
+                        let mut out = vec![];
+                        for c in want.children {
+                            out.push(generate_inline(c));
+                        }
+                        out
+                    },
+                });
+            },
+            Inline::Emphasis(want) => {
+                return ShadowDom::Element(ShadowDomElement {
+                    tag: "em",
+                    classes: {
+                        let mut out = HashSet::new();
+                        out.insert(CLASS_NAMESPACE.to_string());
+                        if want.incomplete {
+                            out.insert(CLASS_INCOMPLETE.to_string());
+                        }
+                        out
+                    },
+                    attrs: Default::default(),
+                    children: {
+                        let mut out = vec![];
+                        for c in want.children {
+                            out.push(generate_inline(c));
+                        }
+                        out
+                    },
+                });
+            },
+            Inline::Link(want) => {
+                return ShadowDom::Element(ShadowDomElement {
+                    tag: "span",
+                    classes: {
+                        let mut out = HashSet::new();
+                        out.insert(CLASS_NAMESPACE.to_string());
+                        out.insert(CLASS_PSEUDO_A.to_string());
+                        if want.incomplete {
+                            out.insert(CLASS_INCOMPLETE.to_string());
+                        }
+                        out
+                    },
+                    attrs: Default::default(),
+                    children: {
+                        let mut out = vec![];
+                        out.push(ShadowDom::Text(want.prefix));
+                        for c in want.title {
+                            out.push(generate_inline(c));
+                        }
+                        out.push(ShadowDom::Text(want.infix));
+                        out.push(ShadowDom::Element(ShadowDomElement {
+                            tag: "a",
+                            classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
+                            attrs: {
+                                let mut out = HashMap::new();
+                                out.insert("href".to_string(), want.address.clone());
+                                out
+                            },
+                            children: vec![ShadowDom::Text(want.address)],
+                        }));
+                        out.push(ShadowDom::Text(want.suffix));
+                        out
+                    },
+                });
+            },
+            Inline::Code(want) => {
+                return ShadowDom::Element(ShadowDomElement {
+                    tag: "code",
+                    classes: {
+                        let mut out = HashSet::new();
+                        out.insert(CLASS_NAMESPACE.to_string());
+                        if want.incomplete {
+                            out.insert(CLASS_INCOMPLETE.to_string());
+                        }
+                        out
+                    },
+                    attrs: Default::default(),
+                    children: vec![ShadowDom::Text(want.text)],
+                });
+            },
+        }
+    }
+
     for inline in inlines {
-        children.push(generate_inline(inline));
+        want_children.push(generate_inline(inline));
     }
-    e_line.append_with_node(&children.into_iter().map(|e| JsValue::from(e)).collect()).unwrap();
+    let root = ShadowDom::Element(ShadowDomElement {
+        tag: match line_type {
+            LineType::Normal => "p",
+            LineType::Heading(level) => match level {
+                1 => "h1",
+                2 => "h2",
+                3 => "h3",
+                4 => "h4",
+                5 => "h5",
+                6 => "h6",
+                _ => unreachable!(),
+            },
+            LineType::Code => "code",
+        },
+        classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
+        attrs: Default::default(),
+        children: want_children,
+    });
+    let offset = Cell::new(0usize);
+    sync_shadow_dom(&mut cursor, &offset, &line, root);
 }
 
 fn get_indent_block(id: usize) -> Element {
@@ -971,7 +888,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
                 }
                 place_parent = new_parent;
             }
-            place_parent.append_child(&at);
+            place_parent.append_child(&at).unwrap();
 
             // Changed - current line placed in new block
             changed = true;
@@ -1176,15 +1093,13 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
                 parse_state.flush_element(false);
             }
             parse_state.flush_text();
-            if sync_line(
+            sync_line(
                 &at,
                 cursor,
                 line_type,
                 &mut indents.into_iter().map(|(_, x)| x).collect::<Vec<_>>(),
                 parse_state.top_inline,
-            ) {
-                changed = true;
-            }
+            );
         }
 
         // Continue until nothing changes
