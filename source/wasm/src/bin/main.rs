@@ -55,6 +55,16 @@ use {
     },
 };
 
+mod grammar {
+    mod inline {
+        include!(concat!(env!("OUT_DIR"), "/inline/inline.rs"));
+    }
+
+    mod inline_actions {
+        include!(concat!(env!("OUT_DIR"), "/inline/inline_actions.rs"));
+    }
+}
+
 const NAMESPACE: &str = "malarkey";
 const ATTR_ID: &str = formatcp!("{}_id", NAMESPACE);
 const ATTR_INDENT_ID: &str = formatcp!("{}_indent_id", NAMESPACE);

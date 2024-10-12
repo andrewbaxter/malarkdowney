@@ -1,0 +1,35 @@
+Layout: Empty;
+
+EscapedText: EscapeT AnyTextT;
+Children: Inline*;
+
+Inline: Strong | Emphasis | Link | Code | Text;
+
+Strong: StrongT children=Children complete=StrongT?;
+
+Emphasis: EmphasisT children=Children complete=EmphasisT?;
+
+Link: LinkStartT title=Children complete=Link1?;
+Link1: LinkInfixT complete=Link2?;
+Link2: address=LinkAddressText complete=Link3?;
+Link3: LinkEndT;
+LinkAddressText: LinkAddressTextT | EscapedText;
+
+Code: CodeT text=CodeText CodeT;
+CodeText: CodeTextT | EscapedText;
+
+Text: TextT | EscapedText;
+
+terminals
+Empty: "";
+EscapeT: "\\";
+AnyTextT: /./;
+TextT: /[^*_`\\]/;
+CodeT: "`";
+CodeTextT: /[^`\\]/;
+LinkStartT: "[";
+LinkInfixT: "](";
+LinkEndT: ")";
+LinkAddressTextT: /[^)\\]/;
+StrongT: "*";
+EmphasisT: "_";
