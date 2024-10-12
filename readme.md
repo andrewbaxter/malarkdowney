@@ -1,6 +1,6 @@
-# What is this malarkey
+# What is this malarkdown
 
-Malarkey is an inline markdown(-ish) editor.
+Malarkdown is an inline markdown(-ish) editor.
 
 [Try it out](x)!
 
@@ -8,11 +8,11 @@ In typical markdown editors, the mapping between the markdown and the rendered r
 
 Conversely, WYSIWYG rich text editors have the issue that because markup state transitions are invisible and zero-width editing intent is ambiguous. For example, if your cursor is between a normal letter and a bold letter and you type a new letter, should that letter be bold or not? There's no way to convey what you want to the editor, and this is both frustrating and depending on the editor can lead to a lot of junk markup.
 
-Malarkey is a markdown(-ish) editor that sits in the middle: it applies the style to the markdown text as you write it without modifying any text - that is, all control characters are always visible, resolving cursor ambiguity and providing feedback on the final style.
+Malarkdown sits in the middle: it applies the style to the markdown text as you write it without modifying any text - that is, all control characters are always visible, resolving cursor ambiguity and providing feedback on the final style.
 
 ## Implementation
 
-This is done in Rust (wasm) using [rooting](x). You can use it as a library or call `window.malarkey("text")` from javascript to create a malarkey element. At the time of writing wasm doesn't support GC hooks so if you delete a malarkey element in javascript it'll be leaked.
+This is done in Rust (wasm) using [rooting](x). You can use it as a library or call `window.malarkdown("text")` from javascript to create a malarkdown element. At the time of writing wasm doesn't support GC hooks so if you delete a malarkdown element in javascript it'll be leaked.
 
 ## Architecture
 
