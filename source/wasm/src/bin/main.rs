@@ -1,9 +1,6 @@
 use {
     const_format::formatcp,
-    flowcontrol::{
-        shed,
-        superif,
-    },
+    flowcontrol::shed,
     gloo::{
         timers::callback::Timeout,
         utils::{
@@ -32,10 +29,17 @@ use {
             HashMap,
             HashSet,
         },
+        ops::Deref,
         rc::Rc,
         str::FromStr,
     },
     structre::structre,
+    wasm::shadowdom::{
+        generate_shadow_dom,
+        sync_shadow_dom,
+        ShadowDom,
+        ShadowDomElement,
+    },
     wasm_bindgen::{
         closure::Closure,
         convert::IntoWasmAbi,
@@ -43,7 +47,7 @@ use {
         JsValue,
     },
     web_sys::{
-        CharacterData,
+        console,
         Element,
         HtmlElement,
         MutationObserver,
@@ -51,9 +55,17 @@ use {
         MutationRecord,
         Node,
         NodeList,
-        Text,
     },
 };
+
+macro_rules! eprintln{
+    ($pat: literal) => {
+        web_sys:: console:: log_1(& wasm_bindgen:: JsValue:: from_str($pat))
+    };
+    ($pat: literal, $($data: expr), *) => {
+        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!($pat, $($data,) *)))
+    };
+}
 
 mod grammar {
     pub(crate) mod inline {
@@ -162,143 +174,17 @@ struct LineIndent {
     text: String,
 }
 
-enum ShadowDom {
-    Text(String),
-    Element(ShadowDomElement),
-}
-
-struct ShadowDomElement {
-    tag: &'static str,
-    classes: HashSet<String>,
-    attrs: HashMap<String, String>,
-    children: Vec<ShadowDom>,
-}
-
-fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &Node, want: ShadowDom) {
-    fn replace(old: &Node, new: &Node) {
-        old.parent_node().unwrap().replace_child(old, new).unwrap();
-    }
-
-    let mut sync_cursor = |node: &Node| {
-        if let Some(cursor) = cursor.take_if(|cursor| offset.get() < *cursor) {
-            let rel_offset = cursor - offset.get();
-            let sel = window().get_selection().unwrap().unwrap();
-            sel.remove_all_ranges().unwrap();
-            let range = document().create_range().unwrap();
-            range.set_start(node, rel_offset as u32).unwrap();
-            range.set_end(node, rel_offset as u32).unwrap();
-            sel.add_range(&range).unwrap();
-        }
-    };
-    match want {
-        ShadowDom::Text(want) => {
-            let have = match have.dyn_ref::<Text>() {
-                Some(have) => {
-                    if have.text_content().unwrap() != want {
-                        have.set_text_content(Some(&want));
-                    }
-                    have.clone()
-                },
-                None => {
-                    let new = document().create_text_node(&want);
-                    replace(have, &new);
-                    new
-                },
-            };
-            sync_cursor(&have);
-            offset.set(offset.get() + want.len());
-        },
-        ShadowDom::Element(want) => {
-            let have = superif!({
-                let Some(have) = have.dyn_ref::<Element>() else {
-                    break 'mismatch;
-                };
-                if have.tag_name() != want.tag {
-                    break 'mismatch;
-                }
-                break have.clone();
-            } 'mismatch {
-                let new = document().create_element(want.tag).unwrap();
-                replace(have, &new);
-                break new;
-            });
-
-            // Sync attrs
-            let have_attrs = have.get_attribute_names();
-            let mut remove_attrs = vec![];
-            for k in have_attrs {
-                let k = k.as_string().unwrap();
-                if !want.attrs.contains_key(&k) {
-                    remove_attrs.push(k);
-                }
-            }
-            for k in remove_attrs {
-                have.remove_attribute(&k).unwrap();
-            }
-            for (k, v) in want.attrs {
-                have.set_attribute(&k, &v).unwrap();
-            }
-
-            // Sync classes
-            let classes = have.class_list();
-            let mut remove_classes = vec![];
-            for k in classes.entries() {
-                let k = k.unwrap().as_string().unwrap();
-                if !want.classes.contains(&k) {
-                    remove_classes.push(k);
-                }
-            }
-            for k in remove_classes {
-                classes.remove_1(&k).unwrap();
-            }
-            for k in want.classes {
-                classes.add_1(&k).unwrap();
-            }
-
-            // Sync children
-            let have_children = have.child_nodes();
-            let have_children_len = have_children.length() as usize;
-            let mut want_children_iter = want.children.into_iter();
-            let mut i = 0;
-            while i < have_children_len {
-                let Some(want_child) = want_children_iter.next() else {
-                    break;
-                };
-                let have_child = have_children.item(i as u32).unwrap();
-                sync_shadow_dom(cursor, offset, &have_child, want_child);
-                i += 1;
-            }
-            for _ in i .. have_children_len {
-                have.remove_child(&have.last_child().unwrap()).unwrap();
-            }
-            for want_child in want_children_iter {
-                let new = match &want_child {
-                    ShadowDom::Text(want_child) => {
-                        document().create_text_node(&want_child).dyn_into::<Node>().unwrap()
-                    },
-                    ShadowDom::Element(want_child) => {
-                        document().create_element(&want_child.tag).unwrap().dyn_into::<Node>().unwrap()
-                    },
-                };
-                sync_shadow_dom(cursor, offset, &new, want_child);
-                have.append_child(&new).unwrap();
-            }
-        },
-    }
-}
-
-fn sync_line(
-    line: &Element,
-    mut cursor: Option<usize>,
-    line_type: LineType,
-    indents: &mut [LineIndent],
-    inlines: Vec<Inline>,
-) {
+fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inlines: Vec<Inline>) -> ShadowDom {
     let mut want_children = vec![];
     for indent in indents {
         want_children.push(ShadowDom::Element(ShadowDomElement {
             tag: "span",
-            classes: [CLASS_NAMESPACE.to_string(), CLASS_ALIGNED.to_string(), class_aligned(indent.source_indent)]
+            classes: [
+                CLASS_NAMESPACE.to_string(),
+                CLASS_LINE.to_string(),
+                CLASS_ALIGNED.to_string(),
+                class_aligned(indent.source_indent),
+            ]
                 .into_iter()
                 .collect(),
             attrs: [(ATTR_INDENT_ID.to_string(), indent.source_indent.to_string())].into_iter().collect(),
@@ -415,7 +301,7 @@ fn sync_line(
     for inline in inlines {
         want_children.push(generate_inline(inline));
     }
-    let root = ShadowDom::Element(ShadowDomElement {
+    return ShadowDom::Element(ShadowDomElement {
         tag: match line_type {
             LineType::Normal => "p",
             LineType::Heading(level) => match level {
@@ -429,12 +315,21 @@ fn sync_line(
             },
             LineType::Code => "code",
         },
-        classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
+        classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
         attrs: Default::default(),
         children: want_children,
     });
+}
+
+fn sync_line(
+    line: &Element,
+    mut cursor: Option<usize>,
+    line_type: LineType,
+    indents: &mut [LineIndent],
+    inlines: Vec<Inline>,
+) {
     let offset = Cell::new(0usize);
-    sync_shadow_dom(&mut cursor, &offset, &line, root);
+    sync_shadow_dom(&mut cursor, &offset, &line, generate_line_shadowdom(line_type, indents, inlines));
 }
 
 fn get_indent_block(id: usize) -> Element {
@@ -507,12 +402,6 @@ fn set_alignments_to_value(indent_block: Element, aligned: &Vec<Element>, width:
     recurse(&root, &indent_block, Some(aligned));
 }
 
-macro_rules! eprintln{
-    ($pat: literal, $($data: expr), *) => {
-        console::log_1(&JsValue::from_str(&format!($pat, $($data,) *)));
-    };
-}
-
 fn get_aligned_max_width(aligned: &Vec<Element>) -> f32 {
     let mut max_width = 0.;
     for e in aligned {
@@ -526,86 +415,108 @@ fn get_aligned_max_width(aligned: &Vec<Element>) -> f32 {
     return max_width;
 }
 
-fn get_previous_line(n: &Element) -> Option<Element> {
+#[derive(PartialEq)]
+enum MoveMode {
+    Inclusive,
+    Exclusive,
+}
+
+fn get_line_backwards(n: &Node, mode: MoveMode) -> Option<Element> {
+    let mut skip_first_next = mode == MoveMode::Inclusive;
     let mut at = n.clone();
     loop {
         loop {
             // Move backward
-            {
-                let Some(at1) = n.previous_element_sibling() else {
+            if skip_first_next {
+                skip_first_next = false;
+            } else {
+                let Some(at_temp) = at.previous_sibling() else {
+                    // (move up)
                     break;
                 };
-                at = at1;
+                at = at_temp;
             }
 
             // Match or move down
             loop {
-                let class_list = at.class_list();
+                let Some(at_el) = at.dyn_ref::<Element>() else {
+                    break;
+                };
+                let class_list = at_el.class_list();
 
                 // Match
                 if class_list.contains(CLASS_LINE) {
-                    return Some(at.dyn_into().unwrap());
+                    return Some(at_el.clone());
                 }
 
                 // Or move down
-                if !class_list.contains(CLASS_BLOCK_INDENT) {
-                    break;
-                }
-                let Some(at1) = at.last_element_child() else {
+                let Some(at_temp) = at_el.last_child() else {
+                    // (no children, try moving backwards again)
                     break;
                 };
-                at = at1;
+                at = at_temp;
             }
         }
 
         // Move up
         {
-            let Some(at1) = at.parent_element() else {
+            let Some(at_temp) = at.parent_node() else {
                 return None;
             };
-            at = at1;
+            at = at_temp;
+        }
+        if at.dyn_ref::<Element>().unwrap().class_list().contains(CLASS_ROOT) {
+            return None;
         }
     }
 }
 
-fn get_next_line(n: &Element) -> Option<Element> {
+fn get_line_forward(n: &Node, mode: MoveMode) -> Option<Element> {
+    let mut skip_first_next = mode == MoveMode::Inclusive;
     let mut at = n.clone();
     loop {
         loop {
             // Move forward
-            {
-                let Some(at1) = n.next_element_sibling() else {
+            if skip_first_next {
+                skip_first_next = false;
+            } else {
+                let Some(at_temp) = at.next_sibling() else {
+                    // (move up)
                     break;
                 };
-                at = at1;
+                at = at_temp;
             }
 
             // Match or move down
             loop {
-                let class_list = at.class_list();
+                let Some(at_el) = at.dyn_ref::<Element>() else {
+                    break;
+                };
+                let class_list = at_el.class_list();
 
                 // Match
                 if class_list.contains(CLASS_LINE) {
-                    return Some(at.dyn_into().unwrap());
+                    return Some(at_el.clone());
                 }
 
                 // Or move down
-                if !class_list.contains(CLASS_BLOCK_INDENT) {
-                    break;
-                }
-                let Some(at1) = at.first_element_child() else {
+                let Some(at_temp) = at.first_child() else {
+                    // (no children, try moving backwards again)
                     break;
                 };
-                at = at1;
+                at = at_temp;
             }
         }
 
         // Move up
         {
-            let Some(at1) = at.parent_element() else {
+            let Some(at_temp) = at.parent_node() else {
                 return None;
             };
-            at = at1;
+            at = at_temp;
+        }
+        if at.dyn_ref::<Element>().unwrap().class_list().contains(CLASS_ROOT) {
+            return None;
         }
     }
 }
@@ -622,33 +533,6 @@ struct ReHeadingPrefix {
     suffix: String,
 }
 
-fn heading_el_name(level: usize) -> &'static str {
-    return match level {
-        1 => "h1",
-        2 => "h2",
-        3 => "h3",
-        4 => "h4",
-        5 => "h5",
-        6 => "h6",
-        _ => panic!(),
-    };
-}
-
-fn generate_el_block_line(type_: LineType) -> Element {
-    let d = document();
-    match type_ {
-        LineType::Normal => {
-            return d.create_element("p").unwrap();
-        },
-        LineType::Heading(level) => {
-            return d.create_element(&heading_el_name(level)).unwrap();
-        },
-        LineType::Code => {
-            return d.create_element("div").unwrap();
-        },
-    }
-}
-
 fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str) -> (usize, Element) {
     let d = document();
     let e = d.create_element("div").unwrap();
@@ -661,44 +545,55 @@ fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str)
     return (id, e);
 }
 
-fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
-    let mut at = line.clone();
+fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
+    let mut previous_line = get_line_backwards(&line, MoveMode::Exclusive);
+
+    // Locate root
+    let root;
+    {
+        let mut parent_at = line.clone();
+        while !parent_at.class_list().contains(CLASS_ROOT) {
+            console::log_2(&JsValue::from("X _b, not at root yet"), &JsValue::from(&parent_at));
+            let Some(temp) = parent_at.parent_element() else {
+                // Looking at unrooted element?
+                return;
+            };
+            parent_at = temp;
+        }
+        root = parent_at;
+    }
+
+    // Start walking
     loop {
+        console::log_2(&JsValue::from("xupdate lines, at"), &JsValue::from(&line));
         let mut changed = false;
 
         // Determine context by walking previous line's block parents up to root
         let mut indents = vec![];
-        let root;
-        if let Some(previous) = get_previous_line(&at) {
-            let mut context_at = previous.parent_element().unwrap();
+        if let Some(previous) = previous_line {
+            let mut parent_at = previous.parent_element().unwrap();
             let mut parent_index =
-                Array::index_of(&Array::from(&JsValue::from(context_at.children())), &JsValue::from(previous), 0);
-            while !context_at.class_list().contains(CLASS_ROOT) {
-                let id = context_at.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
-                indents.push(((context_at.clone(), parent_index as usize), LineIndent {
+                Array::index_of(&Array::from(&JsValue::from(parent_at.children())), &JsValue::from(previous), 0);
+            while parent_at != root {
+                console::log_2(&JsValue::from("X _a, not at root yet"), &JsValue::from(&parent_at));
+                let id = parent_at.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
+                indents.push(((parent_at.clone(), parent_index as usize), LineIndent {
                     type_: serde_json::from_str::<BlockType>(
-                        &context_at.get_attribute(ATTR_BLOCK_TYPE).unwrap(),
+                        &parent_at.get_attribute(ATTR_BLOCK_TYPE).unwrap(),
                     ).unwrap(),
                     source_indent: id,
                     first_text: None,
                     text: "".to_string(),
                 }));
-                let parent = context_at.parent_element().unwrap();
+                let parent = parent_at.parent_element().unwrap();
                 parent_index =
                     Array::index_of(
                         &Array::from(&JsValue::from(parent.children())),
-                        &JsValue::from(context_at),
+                        &JsValue::from(parent_at),
                         0,
                     );
-                context_at = parent;
+                parent_at = parent;
             }
-            root = context_at;
-        } else {
-            let mut context_ = line.clone();
-            while !context_.class_list().contains(CLASS_ROOT) {
-                context_ = context_.parent_element().unwrap();
-            }
-            root = context_;
         }
         indents.reverse();
 
@@ -713,7 +608,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
             if n.node_type() == Node::TEXT_NODE {
                 break Some((n, sel.anchor_offset() as usize));
             } else if n.node_type() == Node::ELEMENT_NODE {
-                break (Some((n.child_nodes().item(sel.anchor_offset()).unwrap(), sel.anchor_offset() as usize)));
+                break (Some((n.child_nodes().item(sel.anchor_offset()).unwrap(), 0)));
             } else {
                 break None;
             }
@@ -742,10 +637,10 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
 
         let mut text = String::new();
         let mut cursor = None;
-        recurse_get_text(&mut cursor, &mut text, &sel, at.child_nodes());
+        recurse_get_text(&mut cursor, &mut text, &sel, line.child_nodes());
 
         // Check how much we need to deindent
-        let mut place_root = root;
+        let mut place_root = root.clone();
         for ((indent_el, indent_el_index), indent) in &mut indents {
             match &mut indent.type_ {
                 BlockType::BlockQuote => {
@@ -813,107 +708,123 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
             }
         }
 
-        // * Lift up this line and following elements that are between this element and the
-        //   placement root.
-        //
-        // * Find the following element in the placement root.
-        let mut lifted_following = vec![];
-        let mut place_before = None;
-        let original_parent = at.parent_element().unwrap();
-        shed!{
-            let Some(mut lift_at) = at.next_element_sibling() else {
-                break;
-            };
-            at.remove();
-            'lift_end : loop {
-                if lift_at.parent_element().unwrap() == place_root {
-                    place_before = Some(lift_at);
-                    break 'lift_end;
-                }
-                let mut lift_at1 = lift_at.clone();
-                loop {
-                    if let Some(lift_at1b) = lift_at1.next_element_sibling() {
-                        lift_at1 = lift_at1b;
-                        break;
-                    }
-                    lift_at1 = lift_at1.parent_element().unwrap();
-                    if lift_at1.parent_element().unwrap() == place_root {
-                        place_before = Some(lift_at.clone());
-                        break 'lift_end;
-                    }
-                };
-                changed = true;
-                lift_at.remove();
-                lifted_following.push(lift_at);
-                lift_at = lift_at1;
-            }
-        }
-
-        // (Clean up empty left over blocks/containers)
-        let mut clean_up_at = original_parent;
-        let mut clean_up_until = None;
-        loop {
-            if clean_up_at == place_root {
-                break;
-            }
-            if clean_up_at.child_element_count() > 0 {
-                break;
-            }
-            clean_up_until = Some(clean_up_at.clone());
-            clean_up_at = clean_up_at.parent_element().unwrap();
-        }
-        if let Some(clean_up_until) = clean_up_until {
-            clean_up_until.remove();
-        }
-
-        // Create blocks and place this line
-        if create_parents.is_empty() {
-            if place_root != at.parent_element().unwrap() {
-                if let Some(place_before) = &place_before {
-                    place_root.insert_before(&place_before, Some(&at)).unwrap();
-                } else {
-                    place_root.append_child(&at).unwrap();
-                }
-
-                // Changed - current line placed elsewhere
-                changed = true;
-            }
-        } else {
-            let mut place_parent = place_root.clone();
-            for create_parent in create_parents {
-                let new_parent = match create_parent {
-                    BlockType::BlockQuote => generate_el_block_indent(
-                        &mut ids.borrow_mut(),
-                        BlockType::BlockQuote,
-                        CLASS_BLOCKQUOTE,
-                    ).1,
-                    BlockType::Ul => generate_el_block_indent(&mut ids.borrow_mut(), BlockType::Ul, CLASS_UL).1,
-                    BlockType::Ol => generate_el_block_indent(&mut ids.borrow_mut(), BlockType::Ol, CLASS_OL).1,
-                    BlockType::BlockCode => generate_el_block_indent(
-                        &mut ids.borrow_mut(),
-                        BlockType::BlockCode,
-                        CLASS_BLOCKCODE,
-                    ).1,
-                };
-                if let Some(place_before) = &place_before {
-                    place_root.insert_before(&place_before, Some(&new_parent)).unwrap();
-                } else {
-                    place_root.append_child(&new_parent).unwrap();
-                }
-                place_parent = new_parent;
-            }
-            place_parent.append_child(&at).unwrap();
-
-            // Changed - current line placed in new block
+        // Move
+        let original_parent = line.parent_element().unwrap();
+        if place_root != original_parent || !create_parents.is_empty() {
+            eprintln!(
+                "moving, parents equal {}, create parents empty {}",
+                place_root == original_parent,
+                create_parents.is_empty()
+            );
             changed = true;
-        }
 
-        // Place remaining lines
-        for e in lifted_following {
-            if let Some(place_before) = &place_before {
-                place_root.insert_before(&place_before, Some(&e)).unwrap();
+            // * Lift up this line and following elements that are between this element and the
+            //   placement root.
+            //
+            // * Find the following element in the placement root.
+            let mut lift_following = vec![];
+            let place_before;
+            shed!{
+                let mut lift_at = line.clone();
+                'lift_end : loop {
+                    // Find next element
+                    loop {
+                        // Try to move forward
+                        if let Some(lift_at_next) = lift_at.next_element_sibling() {
+                            lift_at = lift_at_next;
+                            console::log_3(
+                                &JsValue::from(
+                                    &format!("lift_at 1, == {}", lift_at.parent_element().unwrap() == place_root),
+                                ),
+                                &JsValue::from(&place_root),
+                                &JsValue::from(&lift_at.parent_element().unwrap()),
+                            );
+                            if lift_at.parent_element().unwrap() == place_root {
+                                // Reached root, stop
+                                place_before = Some(lift_at);
+                                break 'lift_end;
+                            }
+                            break;
+                        }
+                        console::log_3(
+                            &JsValue::from(
+                                &format!("lift_at 2, == {}", lift_at.parent_element().unwrap() == place_root),
+                            ),
+                            &JsValue::from(&place_root),
+                            &JsValue::from(&lift_at.parent_element().unwrap()),
+                        );
+                        if lift_at.parent_element().unwrap() == place_root {
+                            // Reached root (no next element), stop
+                            place_before = None;
+                            break 'lift_end;
+                        }
+
+                        // Can't move forward, try moving up (then resume moving forward)
+                        let lift_at_next = lift_at.parent_element().unwrap();
+                        lift_at = lift_at_next;
+                    };
+
+                    // Remember
+                    lift_following.push(lift_at.clone());
+                }
+            }
+
+            // Lift line + following elements
+            line.remove();
+            for e in &lift_following {
+                e.remove();
+            }
+
+            // (Clean up empty left over blocks/containers)
+            let mut clean_up_at = original_parent.clone();
+            let mut clean_up_until = None;
+            loop {
+                if clean_up_at == place_root {
+                    break;
+                }
+                if clean_up_at.child_element_count() > 0 {
+                    break;
+                }
+                clean_up_until = Some(clean_up_at.clone());
+                clean_up_at = clean_up_at.parent_element().unwrap();
+            }
+            if let Some(clean_up_until) = clean_up_until {
+                clean_up_until.remove();
+            }
+
+            // Create blocks and place this line
+            if create_parents.is_empty() {
+                place_root.insert_before(&line, place_before.as_ref().map(|x| x.deref())).unwrap();
             } else {
-                place_root.append_child(&e).unwrap();
+                let mut place_parent = place_root.clone();
+                for (depth, create_parent) in create_parents.into_iter().enumerate() {
+                    let new_parent = match create_parent {
+                        BlockType::BlockQuote => generate_el_block_indent(
+                            &mut ids.borrow_mut(),
+                            BlockType::BlockQuote,
+                            CLASS_BLOCKQUOTE,
+                        ).1,
+                        BlockType::Ul => generate_el_block_indent(&mut ids.borrow_mut(), BlockType::Ul, CLASS_UL).1,
+                        BlockType::Ol => generate_el_block_indent(&mut ids.borrow_mut(), BlockType::Ol, CLASS_OL).1,
+                        BlockType::BlockCode => generate_el_block_indent(
+                            &mut ids.borrow_mut(),
+                            BlockType::BlockCode,
+                            CLASS_BLOCKCODE,
+                        ).1,
+                    };
+                    place_parent.insert_before(&new_parent, if depth == 0 {
+                        place_before.as_ref().map(|x| x.deref())
+                    } else {
+                        None
+                    }).unwrap();
+                    place_parent = new_parent;
+                }
+                place_parent.append_child(&line).unwrap();
+            }
+
+            // Place remaining lines
+            for e in lift_following {
+                place_root.insert_before(&e, place_before.as_ref().map(|x| x.deref())).unwrap();
             }
         }
 
@@ -930,6 +841,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
             }
 
             // Parse inline
+            eprintln!("Parsing line [{}]", text);
             let ast =
                 grammar::inline::InlineParser::new()
                     .parse(&text)
@@ -1114,7 +1026,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
                 inline.push(translate_ast(e));
             }
             sync_line(
-                &at,
+                &line,
                 cursor,
                 line_type,
                 &mut indents.into_iter().map(|(_, x)| x).collect::<Vec<_>>(),
@@ -1126,10 +1038,11 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, line: Element) {
         if !changed {
             break;
         }
-        let Some(at1) = get_next_line(&line) else {
+        let Some(at1) = get_line_forward(&line, MoveMode::Exclusive) else {
             break;
         };
-        at = at1;
+        previous_line = Some(line);
+        line = at1;
     }
 }
 
@@ -1142,17 +1055,18 @@ fn main() {
     set_root(vec![e_root.clone()]);
 
     // Setup change handler
+    //
+    // TODO move after initial generation
     e_root.ref_own(|self1| {
         let observer = MutationObserver::new(&Closure::<dyn Fn(Array) -> ()>::new({
-            enum ChangeMode {
-                Add,
-                Delete,
-                Text,
+            enum ChangeTargetType {
+                Aligned,
+                Line,
             }
 
             struct Change {
                 element: Element,
-                mode: ChangeMode,
+                type_: ChangeTargetType,
             }
 
             struct DelayState {
@@ -1166,43 +1080,113 @@ fn main() {
             }));
             let ids = ids.clone();
             move |mutations: Array| {
-                for m in mutations {
+                'next_mutation: for m in mutations {
                     let m = MutationRecord::from(m);
                     let mut delay_mut = delay.borrow_mut();
-                    match m.type_().as_str() {
-                        "childList" => {
-                            let removed = m.removed_nodes();
-                            for i in 0 .. removed.length() {
-                                let Some(next) =
-                                    get_next_line(&removed.item(i).unwrap().dyn_into::<Element>().unwrap()) else {
-                                        continue;
+
+                    // Find nearest element
+                    let mut at = {
+                        let mut at = m.target().unwrap();
+                        loop {
+                            match at.dyn_into::<Element>() {
+                                Ok(el) => {
+                                    break el;
+                                },
+                                Err(node) => {
+                                    let Some(at_temp) = node.parent_node() else {
+                                        continue 'next_mutation;
                                     };
-                                delay_mut.changes.push(Change {
-                                    element: next,
-                                    mode: ChangeMode::Delete,
-                                });
+                                    at = at_temp;
+                                },
                             }
-                            let added = m.added_nodes();
-                            for i in 0 .. added.length() {
-                                delay_mut.changes.push(Change {
-                                    element: added.item(i).unwrap().dyn_into().unwrap(),
-                                    mode: ChangeMode::Add,
-                                });
+                        }
+                    };
+
+                    // Find relevant element
+                    enum RelevantType {
+                        Aligned,
+                        Line,
+                        Block,
+                    }
+
+                    let at_type;
+                    {
+                        let mut from_child = false;
+                        let mut at_class_list = at.class_list();
+                        if at_class_list.contains(CLASS_ROOT) {
+                            continue;
+                        }
+                        loop {
+                            if at_class_list.contains(CLASS_ALIGNED) {
+                                at_type = RelevantType::Aligned;
+                                break;
+                            } else if at_class_list.contains(CLASS_LINE) {
+                                at_type = RelevantType::Line;
+                                break;
+                            } else if at_class_list.contains(CLASS_BLOCK_INDENT) {
+                                assert!(!from_child);
+                                at_type = RelevantType::Block;
+                                break;
+                            } else {
+                                console::log_2(
+                                    &JsValue::from("finding relevant change parent"),
+                                    &JsValue::from(&at),
+                                );
+                                at = at.parent_element().unwrap().dyn_into().unwrap();
+                                at_class_list = at.class_list();
+                                from_child = true;
                             }
-                        },
-                        "characterData" => {
+                        }
+                    }
+                    match at_type {
+                        RelevantType::Aligned => {
                             delay_mut.changes.push(Change {
-                                element: JsValue::from(m.target().unwrap())
-                                    .dyn_into::<CharacterData>()
-                                    .unwrap()
-                                    .parent_node()
-                                    .unwrap()
-                                    .dyn_into::<Element>()
-                                    .unwrap(),
-                                mode: ChangeMode::Text,
+                                element: at,
+                                type_: ChangeTargetType::Aligned,
                             });
                         },
-                        _ => panic!(),
+                        RelevantType::Line => {
+                            delay_mut.changes.push(Change {
+                                element: at,
+                                type_: ChangeTargetType::Line,
+                            });
+                        },
+                        RelevantType::Block => {
+                            if m.type_() == "childList" {
+                                // Each mutation is a "splice" operation - in a single element, at a single
+                                // offset, nodes are added and removed.  So we only need to find either the first
+                                // added element, or if there are none the next element after the removal.
+                                let added_nodes = m.added_nodes();
+                                if added_nodes.length() > 0 {
+                                    shed!{
+                                        let Some(next) =
+                                            get_line_forward(
+                                                &added_nodes.get(0).unwrap(),
+                                                MoveMode::Inclusive,
+                                            ) else {
+                                                break;
+                                            };
+                                        delay_mut.changes.push(Change {
+                                            element: next,
+                                            type_: ChangeTargetType::Line,
+                                        });
+                                    }
+                                } else if m.removed_nodes().length() > 0 {
+                                    shed!{
+                                        let Some(next) = m.next_sibling() else {
+                                            break;
+                                        };
+                                        let Some(next) = get_line_forward(&next, MoveMode::Inclusive) else {
+                                            break;
+                                        };
+                                        delay_mut.changes.push(Change {
+                                            element: next,
+                                            type_: ChangeTargetType::Line,
+                                        });
+                                    }
+                                }
+                            }
+                        },
                     }
                     delay_mut.delay = Some(Timeout::new(200, {
                         let delay = delay.clone();
@@ -1214,52 +1198,42 @@ fn main() {
                             drop(delay_mut);
                             let mut seen = HashSet::new();
                             for change in changes {
+                                eprintln!("change start");
                                 if !seen.insert(JsValue::from(change.element.clone()).as_ref().into_abi()) {
                                     continue;
                                 }
-                                match change.mode {
-                                    ChangeMode::Add => {
-                                        // Line created, process to fix styling
-                                        //
-                                        // * todo, carry over context (indents) as a convenience?
-                                        update_lines_starting_at(&ids, change.element);
-                                    },
-                                    ChangeMode::Delete => {
-                                        // Line removed, try updating next sibling in case context had changed
-                                        update_lines_starting_at(&ids, change.element);
-                                    },
-                                    ChangeMode::Text => {
-                                        let mut at = change.element;
-                                        let mut at_class_list = at.class_list();
-                                        loop {
-                                            if at_class_list.contains(CLASS_ALIGNED) {
-                                                // Sync alignments due to indentation changes (line removed, line added with
-                                                // larger number)
-                                                let id = usize::from_str_radix(&at.get_attribute(ATTR_INDENT_ID).unwrap(), 10).unwrap();
-                                                let indent_block = get_indent_block(id);
-                                                let width = at.first_element_child().unwrap().client_width() as f32;
-                                                let set_width = get_padding_left(&indent_block);
-                                                if width > set_width {
-                                                    set_alignments_to_value(indent_block, &get_aligned(id), width);
-                                                } else if width < set_width * 0.2 {
-                                                    let aligned = get_aligned(id);
-                                                    let max_width = get_aligned_max_width(&aligned);
-                                                    if max_width < set_width * 0.9 {
-                                                        set_alignments_to_value(indent_block, &aligned, max_width);
-                                                    }
+                                match change.type_ {
+                                    ChangeTargetType::Aligned => {
+                                        let Some(line) = change.element.parent_element() else {
+                                            continue;
+                                        };
+                                        update_lines_starting_at(&ids, line);
+
+                                        // If aligned didn't get removed continue with sync
+                                        if change.element.parent_node().is_some() {
+                                            // Sync alignments due to indentation changes (line removed, line added with
+                                            // larger number)
+                                            let id = usize::from_str_radix(&change.element.get_attribute(ATTR_INDENT_ID).unwrap(), 10).unwrap();
+                                            let indent_block = get_indent_block(id);
+                                            let width =
+                                                change.element.first_element_child().unwrap().client_width() as f32;
+                                            let set_width = get_padding_left(&indent_block);
+                                            if width > set_width {
+                                                set_alignments_to_value(indent_block, &get_aligned(id), width);
+                                            } else if width < set_width * 0.2 {
+                                                let aligned = get_aligned(id);
+                                                let max_width = get_aligned_max_width(&aligned);
+                                                if max_width < set_width * 0.9 {
+                                                    set_alignments_to_value(indent_block, &aligned, max_width);
                                                 }
-                                                break;
-                                            } else if at_class_list.contains(CLASS_LINE) {
-                                                // Markdown changed - replace line, modify document structure, sync line contents
-                                                update_lines_starting_at(&ids, at);
-                                                break;
-                                            } else {
-                                                at = at.parent_element().unwrap().dyn_into().unwrap();
-                                                at_class_list = at.class_list();
                                             }
                                         }
                                     },
+                                    ChangeTargetType::Line => {
+                                        update_lines_starting_at(&ids, change.element);
+                                    },
                                 }
+                                eprintln!("change end");
                             }
                         }
                     }));
@@ -1286,26 +1260,36 @@ fn main() {
         fn recursive_generate_block(ctx: &mut GenerateContext, parent_container: &mut Vec<Element>, block: Block) {
             match block {
                 Block::Heading(level, block) => {
-                    let e_line = generate_el_block_line(LineType::Heading(level));
-                    e_line.class_list().add_1(CLASS_LINE).unwrap();
-                    sync_line(&e_line, None, LineType::Heading(level), &mut ctx.indents, block);
-                    parent_container.push(e_line);
+                    parent_container.push(
+                        generate_shadow_dom(
+                            &Cell::new(0usize),
+                            generate_line_shadowdom(LineType::Heading(level), &mut ctx.indents, block),
+                        )
+                            .dyn_into()
+                            .unwrap(),
+                    );
                 },
                 Block::Line(block) => {
-                    let e_line = generate_el_block_line(LineType::Normal);
-                    e_line.class_list().add_1(CLASS_LINE).unwrap();
-                    sync_line(&e_line, None, LineType::Normal, &mut ctx.indents, block);
-                    parent_container.push(e_line);
+                    parent_container.push(
+                        generate_shadow_dom(
+                            &Cell::new(0usize),
+                            generate_line_shadowdom(LineType::Normal, &mut ctx.indents, block),
+                        )
+                            .dyn_into()
+                            .unwrap(),
+                    );
                 },
                 Block::Code(block) => {
                     let (_, e_block) =
                         generate_el_block_indent(&mut ctx.ids.borrow_mut(), BlockType::BlockCode, CLASS_BLOCKCODE);
                     let mut children = vec![];
                     for child in block {
-                        let e_line = generate_el_block_line(LineType::Code);
-                        e_line.class_list().add_1(CLASS_LINE).unwrap();
-                        e_line.set_text_content(Some(&child));
-                        children.push(e_line);
+                        children.push(
+                            generate_shadow_dom(
+                                &Cell::new(0usize),
+                                generate_line_shadowdom(LineType::Code, &mut ctx.indents, vec![Inline::Text(child)]),
+                            ),
+                        );
                     }
                     e_block.append_with_node(&children.into_iter().map(|e| JsValue::from(e)).collect()).unwrap();
                     parent_container.push(e_block);
@@ -1392,8 +1376,6 @@ fn main() {
             let aligned = get_aligned(id);
             let max_width = get_aligned_max_width(&aligned);
             let indent_block = get_indent_block(id);
-
-            //. eprintln!("initial alignment; id {}, aligned count {}, max_width {}", id, aligned.len(), max_width);
             set_alignments_to_value(indent_block, &aligned, max_width);
         }
     }

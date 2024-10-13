@@ -35,7 +35,7 @@ TextCharT: /[^*_`\\]/;
 CodeDelimT: "`";
 CodeCharT: /[^`\\]/;
 LinkTitlePrefixT: "[";
-LinkTitleSuffixT: "](";
+LinkTitleSuffixT: "]";
 LinkAddressPrefixT: "(";
 LinkAddressSuffixT: ")";
 LinkAddressCharT: /[^)\\]/;
