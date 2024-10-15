@@ -11,7 +11,10 @@ use {
             window,
         },
     },
-    js_sys::Array,
+    js_sys::{
+        Array,
+        WeakMap,
+    },
     rooting::{
         el,
         el_from_raw,
@@ -79,7 +82,7 @@ mod grammar {
     }
 }
 
-const NAMESPACE: &str = "malarkey";
+const NAMESPACE: &str = "malarkdowney";
 const ATTR_ID: &str = formatcp!("{}_id", NAMESPACE);
 const ATTR_INDENT_ID: &str = formatcp!("{}_indent_id", NAMESPACE);
 const ATTR_BLOCK_TYPE: &str = formatcp!("{}_block_type", NAMESPACE);
@@ -180,21 +183,11 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
     for indent in indents {
         want_children.push(ShadowDom::Element(ShadowDomElement {
             tag: "span",
-            classes: [
-                CLASS_NAMESPACE.to_string(),
-                CLASS_LINE.to_string(),
-                CLASS_ALIGNED.to_string(),
-                class_aligned(indent.source_indent),
-            ]
+            classes: [CLASS_NAMESPACE.to_string(), CLASS_ALIGNED.to_string(), class_aligned(indent.source_indent)]
                 .into_iter()
                 .collect(),
             attrs: [(ATTR_INDENT_ID.to_string(), indent.source_indent.to_string())].into_iter().collect(),
-            children: vec![ShadowDom::Element(ShadowDomElement {
-                tag: "span",
-                classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
-                attrs: Default::default(),
-                children: vec![ShadowDom::Text(indent.first_text.take().unwrap_or_else(|| indent.text.clone()))],
-            })],
+            children: vec![ShadowDom::Text(indent.first_text.take().unwrap_or_else(|| indent.text.clone()))],
         }));
     }
 
@@ -322,21 +315,6 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
     });
 }
 
-fn sync_line(
-    line: &Element,
-    mut cursor: Option<usize>,
-    line_type: LineType,
-    indents: &mut [LineIndent],
-    inlines: Vec<Inline>,
-) {
-    let offset = Cell::new(0usize);
-    sync_shadow_dom(&mut cursor, &offset, &line, generate_line_shadowdom(line_type, indents, inlines));
-}
-
-fn get_indent_block(id: usize) -> Element {
-    return document().get_element_by_id(&css_id_block(id)).unwrap().dyn_into::<Element>().unwrap();
-}
-
 fn get_aligned(id: usize) -> Vec<Element> {
     let mut out = vec![];
     let aligned = document().get_elements_by_class_name(&class_aligned(id));
@@ -346,38 +324,16 @@ fn get_aligned(id: usize) -> Vec<Element> {
     return out;
 }
 
-fn get_padding_left(e: &Element) -> f32 {
-    return window()
-        .get_computed_style(e)
-        .unwrap()
-        .unwrap()
-        .get_property_value("padding-left")
-        .unwrap()
-        .strip_suffix("px")
-        .unwrap()
-        .parse::<f32>()
-        .unwrap();
-}
-
-fn set_alignments_to_value(indent_block: Element, aligned: &Vec<Element>, width: f32) {
+fn set_indent(root: &Element, indent_block: Element, aligned: &Vec<Element>, width: f32, recurse: bool) {
+    let root_left = root.get_bounding_client_rect().left();
     let indent_block = indent_block.dyn_into::<HtmlElement>().unwrap();
 
-    // Update widths
+    // Update block width
     indent_block.style().set_property("padding-left", &format!("{}px", width)).unwrap();
 
-    // Recursively update alignments for child lines
-    let root = {
-        let mut at = indent_block.clone();
-        loop {
-            at = at.parent_element().unwrap().dyn_into::<HtmlElement>().unwrap();
-            if at.class_list().contains(CLASS_ROOT) {
-                break at;
-            }
-        }
-    };
-
-    fn recurse(root: &Element, indent_block: &Element, aligned: Option<&Vec<Element>>) {
-        let right = indent_block.client_left() as f32 + get_padding_left(indent_block) - root.client_left() as f32;
+    // Recursively update child blocks and all line alignments
+    fn do_recurse(root_left: f64, indent_block: &Element, aligned: Option<&Vec<Element>>, recurse: bool) {
+        let left = indent_block.get_bounding_client_rect().left() - root_left;
         let aligned = match aligned {
             Some(a) => Cow::Borrowed(a),
             None => {
@@ -385,29 +341,28 @@ fn set_alignments_to_value(indent_block: Element, aligned: &Vec<Element>, width:
                 Cow::Owned(get_aligned(id))
             },
         };
+        let want_prop = format!("{}px", left);
         for e in aligned.as_ref() {
-            let style = e.dyn_ref::<HtmlElement>().unwrap().style();
-            style.set_property("left", &format!("{}px", right)).unwrap();
+            e.dyn_ref::<HtmlElement>().unwrap().style().set_property("left", &want_prop).unwrap();
         }
         let children = indent_block.children();
         for i in 0 .. children.length() {
             let Ok(child) = children.item(i).unwrap().dyn_into::<Element>() else {
                 continue;
             };
-            if child.class_list().contains(CLASS_BLOCK_INDENT) {
-                recurse(root, &child, None);
+            if recurse && child.class_list().contains(CLASS_BLOCK_INDENT) {
+                do_recurse(root_left, &child, None, recurse);
             }
         }
     }
 
-    recurse(&root, &indent_block, Some(aligned));
+    do_recurse(root_left, &indent_block, Some(aligned), recurse);
 }
 
 fn get_aligned_max_width(aligned: &Vec<Element>) -> f32 {
     let mut max_width = 0.;
     for e in aligned {
         // Get inner text that actually has width
-        let e = e.first_element_child().unwrap();
         let width = e.client_width() as f32;
         if width > max_width {
             max_width = width;
@@ -546,7 +501,11 @@ fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str)
     return (id, e);
 }
 
-fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
+struct UpdateLinesStartingAtCtx {
+    ids: Rc<RefCell<usize>>,
+}
+
+fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Element) {
     let mut context_line = get_line_backwards(&line, MoveMode::Exclusive);
 
     // Locate root
@@ -566,7 +525,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
     // Start walking
     loop {
         let mut changed = false;
-        let mut build_indents = vec![];
+        let mut indents = vec![];
 
         // Get text + selection
         let sel = shed!{
@@ -626,6 +585,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
         let mut text = String::new();
         let mut cursor = None;
         recurse_get_text(&mut cursor, &mut text, &sel, line.child_nodes());
+        eprintln!("Line! Text [{}]", text);
 
         // Find default root
         let mut place_before = line.next_sibling();
@@ -655,18 +615,12 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                 at_parent = at_parent.parent_element().unwrap();
             }
             root_context_path.reverse();
-            let context_children = context_line.child_nodes();
+            let context_children = context_line.children();
             for (i, (_, _, block_indent)) in root_context_path.iter_mut().enumerate() {
-                let Some(line_indent_outer) = context_children.item(i as u32) else {
+                let Some(aligned) = context_children.item(i as u32) else {
                     continue;
                 };
-                let Some(line_indent_inner) = line_indent_outer.first_child() else {
-                    continue;
-                };
-                let Ok(line_indent_inner) = line_indent_inner.dyn_into::<Element>() else {
-                    continue;
-                };
-                block_indent.text = " ".repeat(line_indent_inner.text_content().unwrap().len());
+                block_indent.text = " ".repeat(aligned.text_content().unwrap().len());
             }
 
             // Find higest indent of previous/context this should be placed under by matching
@@ -711,12 +665,11 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                 }
                 place_parent = parent;
                 place_before = parent_next;
-                build_indents.push(indent);
+                indents.push(indent);
             }
         }
 
         // Check if in a subtree of the placement root (and figure out the subpath indents)
-        //. console::log_3(&JsValue::from("is under place parent?"), &JsValue::from(&root), &JsValue::from(&place_parent));
         let mut context_line_path = vec![];
         let mut lift_following = vec![];
         superif!({
@@ -754,14 +707,6 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                         // Try to move forward
                         if let Some(lift_at_next) = lift_at.next_element_sibling() {
                             lift_at = lift_at_next;
-
-                            //.                            console::log_3(
-                            //.                                &JsValue::from(
-                            //.                                    &format!("lift_at 1, == {}", lift_at.parent_element().unwrap() == place_parent),
-                            //.                                ),
-                            //.                                &JsValue::from(&place_parent),
-                            //.                                &JsValue::from(&lift_at.parent_element().unwrap()),
-                            //.                            );
                             if lift_at.parent_element().unwrap() == place_parent {
                                 // Reached root, stop
                                 place_before = Some(lift_at.dyn_into().unwrap());
@@ -769,14 +714,6 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                             }
                             break;
                         }
-
-                        //.                        console::log_3(
-                        //.                            &JsValue::from(
-                        //.                                &format!("lift_at 2, == {}", lift_at.parent_element().unwrap() == place_parent),
-                        //.                            ),
-                        //.                            &JsValue::from(&place_parent),
-                        //.                            &JsValue::from(&lift_at.parent_element().unwrap()),
-                        //.                        );
                         if lift_at.parent_element().unwrap() == place_parent {
                             // Reached root (no next element), stop
                             place_before = None;
@@ -830,7 +767,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                 }
                 place_parent = parent;
                 place_before = parent_next;
-                build_indents.push(indent);
+                indents.push(indent);
             }
         });
 
@@ -840,7 +777,8 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
             if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
                 text = suffix1.to_string();
                 let type_ = BlockType::BlockQuote;
-                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_BLOCKQUOTE);
+                let (parent_id, parent) =
+                    generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKQUOTE);
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: BlockType::BlockQuote,
@@ -850,7 +788,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
             } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
                 text = suffix1.to_string();
                 let type_ = BlockType::Ul;
-                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_UL);
+                let (parent_id, parent) = generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_UL);
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: type_,
@@ -860,7 +798,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
             } else if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
                 text = parsed.suffix;
                 let type_ = BlockType::Ol;
-                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_OL);
+                let (parent_id, parent) = generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_OL);
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: type_,
@@ -870,7 +808,8 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
             } else if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKCODE) {
                 text = suffix1.to_string();
                 let type_ = BlockType::BlockCode;
-                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_BLOCKCODE);
+                let (parent_id, parent) =
+                    generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKCODE);
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: type_,
@@ -886,10 +825,10 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
         // Move
         let original_parent = line.parent_element().unwrap();
         eprintln!(
-            "Line [{}]\nplace parent same {}, matched indents {:?}, create indents {:?}",
+            "Remaining text [{}]\nplace parent same {}, matched indents {:?}, create indents {:?}",
             text,
             place_parent == original_parent,
-            build_indents.iter().map(|p| format!("{:?}", p.type_)).collect::<Vec<_>>(),
+            indents.iter().map(|p| format!("{:?}", p.type_)).collect::<Vec<_>>(),
             create_parents.iter().map(|p| format!("{:?}", p.1.type_)).collect::<Vec<_>>()
         );
         console::log_2(
@@ -934,7 +873,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                         None
                     }).unwrap();
                     place_parent = new_parent;
-                    build_indents.push(indent);
+                    indents.push(indent);
                 }
                 place_parent.append_child(&line).unwrap();
             }
@@ -1143,7 +1082,54 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
             //.     }
             eprintln!("syncing line, cursor {:?}", cursor);
             let inline = vec![Inline::Text(text)];
-            sync_line(&line, cursor, line_type, &mut build_indents, inline);
+            {
+                let offset = Cell::new(0usize);
+                sync_shadow_dom(
+                    &mut cursor,
+                    &offset,
+                    &line,
+                    generate_line_shadowdom(line_type, &mut indents, inline),
+                );
+            }
+        }
+
+        // Update indents
+        {
+            let children = line.children();
+            for i in 0 .. children.length() {
+                let child = children.item(i).unwrap();
+                let Some(id) = child.get_attribute(ATTR_INDENT_ID) else {
+                    break;
+                };
+                let id = usize::from_str_radix(&id, 10).unwrap();
+                let indent_block =
+                    document().get_element_by_id(&css_id_block(id)).unwrap().dyn_into::<Element>().unwrap();
+                let width = child.client_width() as f32;
+                let set_width =
+                    window()
+                        .get_computed_style(&indent_block)
+                        .unwrap()
+                        .unwrap()
+                        .get_property_value("padding-left")
+                        .unwrap()
+                        .strip_suffix("px")
+                        .unwrap()
+                        .parse::<f32>()
+                        .unwrap();
+                if width > set_width {
+                    set_indent(&root, indent_block, &get_aligned(id), width, true);
+                } else {
+                    let style = child.dyn_into::<HtmlElement>().unwrap().style();
+                    let want_prop =
+                        format!(
+                            "{}px",
+                            indent_block.get_bounding_client_rect().left() - root.get_bounding_client_rect().left()
+                        );
+                    if style.get_property_value("left").unwrap() != want_prop {
+                        style.set_property("left", &want_prop).unwrap();
+                    }
+                }
+            }
         }
 
         // Continue until nothing changes
@@ -1162,207 +1148,9 @@ fn main() {
     console_error_panic_hook::set_once();
     let ids = Rc::new(RefCell::new(0usize));
 
-    // Create root
-    let e_root = el("div").classes(&[NAMESPACE, CLASS_ROOT]).attr("contenteditable", "true");
-    set_root(vec![e_root.clone()]);
-
-    // Setup change handler
-    //
-    // TODO move after initial generation
-    e_root.ref_own(|self1| {
-        let observer = MutationObserver::new(&Closure::<dyn Fn(Array) -> ()>::new({
-            enum ChangeTargetType {
-                Aligned,
-                Line,
-            }
-
-            struct Change {
-                element: Element,
-                type_: ChangeTargetType,
-            }
-
-            struct DelayState {
-                delay: Option<Timeout>,
-                changes: Vec<Change>,
-            }
-
-            let delay = Rc::new(RefCell::new(DelayState {
-                delay: None,
-                changes: vec![],
-            }));
-            let ids = ids.clone();
-            move |mutations: Array| {
-                'next_mutation: for m in mutations {
-                    let m = MutationRecord::from(m);
-                    let mut delay_mut = delay.borrow_mut();
-
-                    // Find nearest element
-                    let mut at = {
-                        let mut at = m.target().unwrap();
-                        loop {
-                            match at.dyn_into::<Element>() {
-                                Ok(el) => {
-                                    break el;
-                                },
-                                Err(node) => {
-                                    let Some(at_temp) = node.parent_node() else {
-                                        continue 'next_mutation;
-                                    };
-                                    at = at_temp;
-                                },
-                            }
-                        }
-                    };
-
-                    // Find relevant element
-                    enum RelevantType {
-                        Aligned,
-                        Line,
-                        Block,
-                    }
-
-                    let at_type;
-                    {
-                        let mut from_child = false;
-                        let mut at_class_list = at.class_list();
-                        if at_class_list.contains(CLASS_ROOT) {
-                            continue;
-                        }
-                        loop {
-                            if at_class_list.contains(CLASS_ALIGNED) {
-                                at_type = RelevantType::Aligned;
-                                break;
-                            } else if at_class_list.contains(CLASS_LINE) {
-                                at_type = RelevantType::Line;
-                                break;
-                            } else if at_class_list.contains(CLASS_BLOCK_INDENT) {
-                                assert!(!from_child);
-                                at_type = RelevantType::Block;
-                                break;
-                            } else {
-                                console::log_2(
-                                    &JsValue::from("finding relevant change parent"),
-                                    &JsValue::from(&at),
-                                );
-                                at = at.parent_element().unwrap().dyn_into().unwrap();
-                                at_class_list = at.class_list();
-                                from_child = true;
-                            }
-                        }
-                    }
-                    match at_type {
-                        RelevantType::Aligned => {
-                            delay_mut.changes.push(Change {
-                                element: at,
-                                type_: ChangeTargetType::Aligned,
-                            });
-                        },
-                        RelevantType::Line => {
-                            delay_mut.changes.push(Change {
-                                element: at,
-                                type_: ChangeTargetType::Line,
-                            });
-                        },
-                        RelevantType::Block => {
-                            if m.type_() == "childList" {
-                                // Each mutation is a "splice" operation - in a single element, at a single
-                                // offset, nodes are added and removed.  So we only need to find either the first
-                                // added element, or if there are none the next element after the removal.
-                                let added_nodes = m.added_nodes();
-                                if added_nodes.length() > 0 {
-                                    shed!{
-                                        let Some(next) =
-                                            get_line_forward(
-                                                &added_nodes.get(0).unwrap(),
-                                                MoveMode::Inclusive,
-                                            ) else {
-                                                break;
-                                            };
-                                        delay_mut.changes.push(Change {
-                                            element: next,
-                                            type_: ChangeTargetType::Line,
-                                        });
-                                    }
-                                } else if m.removed_nodes().length() > 0 {
-                                    shed!{
-                                        let Some(next) = m.next_sibling() else {
-                                            break;
-                                        };
-                                        let Some(next) = get_line_forward(&next, MoveMode::Inclusive) else {
-                                            break;
-                                        };
-                                        delay_mut.changes.push(Change {
-                                            element: next,
-                                            type_: ChangeTargetType::Line,
-                                        });
-                                    }
-                                }
-                            }
-                        },
-                    }
-                    delay_mut.delay = Some(Timeout::new(200, {
-                        let delay = delay.clone();
-                        let ids = ids.clone();
-                        move || {
-                            let mut delay_mut = delay.borrow_mut();
-                            delay_mut.delay = None;
-                            let changes = delay_mut.changes.split_off(0);
-                            drop(delay_mut);
-                            let mut seen = HashSet::new();
-                            for change in changes {
-                                eprintln!("change start");
-                                if !seen.insert(JsValue::from(change.element.clone()).as_ref().into_abi()) {
-                                    continue;
-                                }
-                                match change.type_ {
-                                    ChangeTargetType::Aligned => {
-                                        let Some(line) = change.element.parent_element() else {
-                                            continue;
-                                        };
-                                        update_lines_starting_at(&ids, line);
-
-                                        // If aligned didn't get removed continue with sync
-                                        if change.element.parent_node().is_some() {
-                                            // Sync alignments due to indentation changes (line removed, line added with
-                                            // larger number)
-                                            let id = usize::from_str_radix(&change.element.get_attribute(ATTR_INDENT_ID).unwrap(), 10).unwrap();
-                                            let indent_block = get_indent_block(id);
-                                            let width =
-                                                change.element.first_element_child().unwrap().client_width() as f32;
-                                            let set_width = get_padding_left(&indent_block);
-                                            if width > set_width {
-                                                set_alignments_to_value(indent_block, &get_aligned(id), width);
-                                            } else if width < set_width * 0.2 {
-                                                let aligned = get_aligned(id);
-                                                let max_width = get_aligned_max_width(&aligned);
-                                                if max_width < set_width * 0.9 {
-                                                    set_alignments_to_value(indent_block, &aligned, max_width);
-                                                }
-                                            }
-                                        }
-                                    },
-                                    ChangeTargetType::Line => {
-                                        update_lines_starting_at(&ids, change.element);
-                                    },
-                                }
-                                eprintln!("change end");
-                            }
-                        }
-                    }));
-                }
-            }
-        }).into_js_value().into()).unwrap();
-        observer.observe_with_options(&self1.raw(), &{
-            let o = MutationObserverInit::new();
-            o.set_child_list(true);
-            o.set_character_data(true);
-            o.set_subtree(true);
-            o
-        }).unwrap();
-        observer
-    });
-
-    // Populate initial data
+    // Create initial tree
+    let root = el("div").classes(&[NAMESPACE, CLASS_ROOT]).attr("contenteditable", "true");
+    set_root(vec![root.clone()]);
     {
         struct GenerateContext {
             ids: Rc<RefCell<usize>>,
@@ -1466,7 +1254,7 @@ fn main() {
 
         let mut root_children = vec![];
         let mut ctx = GenerateContext {
-            ids: ids,
+            ids: ids.clone(),
             indents: vec![],
         };
         for block in [
@@ -1483,12 +1271,147 @@ fn main() {
         ] {
             recursive_generate_block(&mut ctx, &mut root_children, block);
         }
-        e_root.ref_extend(root_children.into_iter().map(el_from_raw).collect());
-        for id in 0 .. *ctx.ids.borrow() {
+        root.ref_extend(root_children.into_iter().map(el_from_raw).collect());
+        let indent_blocks = document().get_elements_by_class_name(CLASS_BLOCK_INDENT);
+        for i in 0 .. indent_blocks.length() {
+            let indent_block = indent_blocks.item(i).unwrap();
+            let id = usize::from_str_radix(&indent_block.get_attribute(ATTR_ID).unwrap(), 10).unwrap();
             let aligned = get_aligned(id);
             let max_width = get_aligned_max_width(&aligned);
-            let indent_block = get_indent_block(id);
-            set_alignments_to_value(indent_block, &aligned, max_width);
+            set_indent(&root.raw(), indent_block, &aligned, max_width, false);
         }
     }
+
+    // Setup change handler
+    root.ref_own(|self1| {
+        let observer = MutationObserver::new(&Closure::<dyn Fn(Array) -> ()>::new({
+            struct Change {
+                element: Element,
+            }
+
+            struct DelayState {
+                delay: Option<Timeout>,
+                changes: Vec<Change>,
+            }
+
+            let delay = Rc::new(RefCell::new(DelayState {
+                delay: None,
+                changes: vec![],
+            }));
+            let ids = ids.clone();
+            move |mutations: Array| {
+                'next_mutation: for m in mutations {
+                    let m = MutationRecord::from(m);
+                    let mut starts = vec![];
+
+                    // Start from added elements
+                    let added_nodes = m.added_nodes();
+                    for i in 0 .. added_nodes.length() {
+                        let Some(at) = added_nodes.item(i) else {
+                            continue;
+                        };
+                        starts.push(at);
+                    }
+
+                    // Then get first element after removed elements or use the target node as the
+                    // starting point
+                    let following = shed!{
+                        'start _;
+                        if m.type_() == "childList" {
+                            shed!{
+                                let previous = if added_nodes.length() == 0 {
+                                    let Some(previous) = m.previous_sibling() else {
+                                        break;
+                                    };
+                                    previous
+                                } else {
+                                    let Some(last_added) = added_nodes.item(added_nodes.length() - 1) else {
+                                        break;
+                                    };
+                                    last_added
+                                };
+                                if let Some(following) = previous.next_sibling() {
+                                    break 'start following;
+                                }
+                            };
+
+                            // Otherwise maybe child of a line/block
+                            break 'start m.target().unwrap();
+                        }
+                        else {
+                            // Text within line
+                            break 'start m.target().unwrap();
+                        }
+                    };
+                    starts.push(following);
+
+                    // For each start, check if it's a line (or get the next line otherwise that could
+                    // be affected by the change)
+                    let mut delay_mut = delay.borrow_mut();
+                    for start in starts {
+                        let line = shed!{
+                            'found _;
+                            // Search for a line upward
+                            let mut at = start.clone();
+                            loop {
+                                if let Some(at_temp) = at.dyn_ref::<Element>() {
+                                    let classes = at_temp.class_list();
+                                    if classes.contains(CLASS_LINE) {
+                                        break 'found at_temp.clone();
+                                    }
+                                    if classes.contains(CLASS_BLOCK_INDENT) {
+                                        break;
+                                    }
+                                    if classes.contains(CLASS_ROOT) {
+                                        break;
+                                    }
+                                }
+                                let Some(at_temp) = at.parent_node() else {
+                                    break;
+                                };
+                                at = at_temp;
+                            }
+                            // Not within a line, so some child of a block? So find the next line to start from
+                            let Some(line) = get_line_forward(&start, MoveMode::Inclusive) else {
+                                continue 'next_mutation;
+                            };
+                            break 'found line;
+                        };
+                        delay_mut.changes.push(Change { element: line });
+                    }
+
+                    // Throttle change handling, don't cause lag while typing actively
+                    delay_mut.delay = Some(Timeout::new(200, {
+                        let delay = delay.clone();
+                        let ids = ids.clone();
+                        move || {
+                            let mut delay_mut = delay.borrow_mut();
+                            delay_mut.delay = None;
+                            let changes = delay_mut.changes.split_off(0);
+                            drop(delay_mut);
+                            let seen = js_sys::Set::new(&JsValue::from(js_sys::Array::new()));
+                            let mut ctx = UpdateLinesStartingAtCtx { ids: ids };
+                            for change in changes {
+                                let el_js_value = JsValue::from(&change.element);
+                                if seen.has(&el_js_value) {
+                                    continue;
+                                }
+                                seen.add(&el_js_value);
+                                update_lines_starting_at(&mut ctx, change.element);
+                                eprintln!("change end");
+                            }
+                        }
+                    }));
+                }
+            }
+        }).into_js_value().into()).unwrap();
+        observer.observe_with_options(&self1.raw(), &{
+            let o = MutationObserverInit::new();
+            o.set_child_list(true);
+            o.set_character_data(true);
+            o.set_subtree(true);
+            o
+        }).unwrap();
+        observer
+    });
 }

@@ -1,7 +1,27 @@
-.malarkey {
-  position: relative;
+body {
+  display: grid;
+  grid-template-columns: 1fr;
+  align-items: center;
+  align-items: center;
 }
 
-.malarkey_alignment {
+.malarkdowney {
+  white-space-collapse: preserve;
+  & * {
+    padding: 0;
+    margin: 0;
+    font-family: sans-serif;
+  }
+}
+
+.malarkdowney_root {
+  position: relative;
+  padding: 0.5cm;
+  border-radius: 0.1cm;
+  border: 0.02cm solid rgba(0, 0, 0, 0.3);
+}
+
+.malarkdowney_aligned {
   position: absolute;
+  min-width: max-content;
 }
