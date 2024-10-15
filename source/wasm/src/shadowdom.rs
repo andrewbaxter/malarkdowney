@@ -94,20 +94,20 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                         have.set_text_content(Some(&want));
                     }
                     shed!{
-                        let Some(cursor) = cursor.take_if(|cursor| offset.get() < *cursor) else {
+                        let Some(cursor) = cursor.take_if(|cursor| offset.get() + want.len() >= *cursor) else {
                             break;
                         };
                         let rel_offset = cursor - offset.get();
+                        console::log_2(
+                            &JsValue::from(&format!("sync dom - set sel at rel offset {}", rel_offset)),
+                            &JsValue::from(have),
+                        );
                         let sel = window().get_selection().unwrap().unwrap();
                         sel.remove_all_ranges().unwrap();
                         let range = document().create_range().unwrap();
                         range.set_start(&have, rel_offset as u32).unwrap();
                         range.set_end(&have, rel_offset as u32).unwrap();
                         sel.add_range(&range).unwrap();
-                        console::log_2(
-                            &JsValue::from(&format!("sync dom - set sel at rel offset {}", rel_offset)),
-                            &JsValue::from(have),
-                        );
                     };
                     offset.set(offset.get() + want.len());
                 },
@@ -137,6 +137,9 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                 let mut remove_attrs = vec![];
                 for k in have.get_attribute_names() {
                     let k = k.as_string().unwrap();
+                    if k == "class" || k == "style" {
+                        continue;
+                    }
                     if !want.attrs.contains_key(&k) {
                         remove_attrs.push(k);
                     }
@@ -150,19 +153,25 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                 }
             }
             for (k, v) in want.attrs {
-                console::log_2(
-                    &JsValue::from(&format!("sync dom - setting attr [{}] [{}]", k, v)),
-                    &JsValue::from(&have),
-                );
-                have.set_attribute(&k, &v).unwrap();
+                if have.get_attribute(&k).as_ref() != Some(&v) {
+                    console::log_2(
+                        &JsValue::from(&format!("sync dom - setting attr [{}] [{}]", k, v)),
+                        &JsValue::from(&have),
+                    );
+                    have.set_attribute(&k, &v).unwrap();
+                }
             }
 
             // Sync classes
             let classes = have.class_list();
             {
                 let mut remove_classes = vec![];
-                for k in classes.entries() {
-                    let k = k.unwrap().as_string().unwrap();
+                for k in classes.values() {
+                    let k = k.unwrap();
+                    let Some(k) = k.as_string() else {
+                        console::log_2(&JsValue::from("error current class as str"), &k);
+                        continue;
+                    };
                     if !want.classes.contains(&k) {
                         remove_classes.push(k);
                     }
@@ -176,27 +185,31 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                 }
             }
             for k in want.classes {
-                console::log_2(
-                    &JsValue::from(&format!("sync dom - setting class [{}]", k)),
-                    &JsValue::from(&have),
-                );
-                classes.add_1(&k).unwrap();
+                if !classes.contains(&k) {
+                    console::log_2(
+                        &JsValue::from(&format!("sync dom - setting class [{}]", k)),
+                        &JsValue::from(&have),
+                    );
+                    classes.add_1(&k).unwrap();
+                }
             }
 
             // Sync children
             let have_children = have.child_nodes();
             let have_children_len = have_children.length() as usize;
-            console::log_2(
-                &JsValue::from(&format!("sync dom - have children {}", have_children_len)),
-                &JsValue::from(&have),
-            );
+
+            //. console::log_2(
+            //.     &JsValue::from(&format!("sync dom - have children {}", have_children_len)),
+            //. &JsValue::from(&have),
+            //. );
             let mut want_children_iter = want.children.into_iter();
             let mut i = 0;
             while i < have_children_len {
                 let Some(want_child) = want_children_iter.next() else {
                     break;
                 };
-                eprintln!("sync dom - sync el {}", i);
+
+                //. eprintln!("sync dom - sync el {}", i);
                 let have_child = have_children.item(i as u32).unwrap();
                 sync_shadow_dom(cursor, offset, &have_child, want_child);
                 i += 1;
@@ -219,13 +232,13 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                         document().create_element(&want_child.tag).unwrap().dyn_into::<Node>().unwrap()
                     },
                 };
+                have.append_child(&child).unwrap();
                 console::log_3(
                     &JsValue::from("sync dom - adding missing child"),
                     &JsValue::from(&child),
                     &JsValue::from(&have),
                 );
                 sync_shadow_dom(cursor, offset, &child, want_child);
-                have.append_child(&child).unwrap();
             }
         },
     }

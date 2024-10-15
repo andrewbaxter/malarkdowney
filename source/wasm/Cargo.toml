@@ -5,21 +5,11 @@ edition = "2021"
 
 [dependencies]
 console_error_panic_hook = "0.1"
-gloo = { version = "0.9", features = ["futures"] }
+gloo = { version = "0.9", features = ["futures", "utils"], default-features = false }
 js-sys = "0.3"
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = [
-    "Document",
-    "Range",
-    "Selection",
-    "CssStyleDeclaration",
-    "MutationObserver",
-    "MutationObserverInit",
-    "MutationRecord",
-    "NodeList",
-    "Text",
-] }
+web-sys = { version = "0.3", features = ["Document", "Range", "Selection", "CssStyleDeclaration", "MutationObserver", "MutationObserverInit", "MutationRecord", "NodeList", "Text", "console"] }
 futures = "0.3"
 rooting = { version = "0.1", features = ["futures"] }
 const_format = "0.2"

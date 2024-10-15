@@ -1,6 +1,9 @@
 use {
     const_format::formatcp,
-    flowcontrol::shed,
+    flowcontrol::{
+        shed,
+        superif,
+    },
     gloo::{
         timers::callback::Timeout,
         utils::{
@@ -29,7 +32,6 @@ use {
             HashMap,
             HashSet,
         },
-        ops::Deref,
         rc::Rc,
         str::FromStr,
     },
@@ -94,11 +96,10 @@ const CLASS_OL: &str = formatcp!("{}_ol", NAMESPACE);
 const CLASS_PSEUDO_A: &str = formatcp!("{}_pseudo_a", NAMESPACE);
 const PREFIX_UL_FIRST: &str = "* ";
 const PREFIX_UL: &str = "   ";
-const PREFIX_OL: &str = "  ";
 const PREFIX_BLOCKQUOTE: &str = "> ";
 const PREFIX_BLOCKCODE: &str = "```";
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 enum BlockType {
     BlockQuote,
     Ul,
@@ -546,14 +547,13 @@ fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str)
 }
 
 fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
-    let mut previous_line = get_line_backwards(&line, MoveMode::Exclusive);
+    let mut context_line = get_line_backwards(&line, MoveMode::Exclusive);
 
     // Locate root
     let root;
     {
         let mut parent_at = line.clone();
         while !parent_at.class_list().contains(CLASS_ROOT) {
-            console::log_2(&JsValue::from("X _b, not at root yet"), &JsValue::from(&parent_at));
             let Some(temp) = parent_at.parent_element() else {
                 // Looking at unrooted element?
                 return;
@@ -565,51 +565,39 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
 
     // Start walking
     loop {
-        console::log_2(&JsValue::from("xupdate lines, at"), &JsValue::from(&line));
         let mut changed = false;
-
-        // Determine context by walking previous line's block parents up to root
-        let mut indents = vec![];
-        if let Some(previous) = previous_line {
-            let mut parent_at = previous.parent_element().unwrap();
-            let mut parent_index =
-                Array::index_of(&Array::from(&JsValue::from(parent_at.children())), &JsValue::from(previous), 0);
-            while parent_at != root {
-                console::log_2(&JsValue::from("X _a, not at root yet"), &JsValue::from(&parent_at));
-                let id = parent_at.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
-                indents.push(((parent_at.clone(), parent_index as usize), LineIndent {
-                    type_: serde_json::from_str::<BlockType>(
-                        &parent_at.get_attribute(ATTR_BLOCK_TYPE).unwrap(),
-                    ).unwrap(),
-                    source_indent: id,
-                    first_text: None,
-                    text: "".to_string(),
-                }));
-                let parent = parent_at.parent_element().unwrap();
-                parent_index =
-                    Array::index_of(
-                        &Array::from(&JsValue::from(parent.children())),
-                        &JsValue::from(parent_at),
-                        0,
-                    );
-                parent_at = parent;
-            }
-        }
-        indents.reverse();
+        let mut build_indents = vec![];
 
         // Get text + selection
         let sel = shed!{
             let Some(sel) = document().get_selection().unwrap() else {
+                eprintln!("no selection");
                 break None;
             };
             let Some(n) = sel.anchor_node() else {
+                eprintln!("no selection anchor node");
                 break None;
             };
             if n.node_type() == Node::TEXT_NODE {
                 break Some((n, sel.anchor_offset() as usize));
             } else if n.node_type() == Node::ELEMENT_NODE {
-                break (Some((n.child_nodes().item(sel.anchor_offset()).unwrap(), 0)));
+                console::log_2(
+                    &JsValue::from(
+                        &format!(
+                            "sel anchor type node; offset {} children {}",
+                            sel.anchor_offset(),
+                            n.child_nodes().length()
+                        ),
+                    ),
+                    &JsValue::from(&n),
+                );
+                let Some(child) = n.child_nodes().item(sel.anchor_offset()) else {
+                    // Spec vague, not sure what happens to cause this
+                    break None;
+                };
+                break (Some((child, 0)));
             } else {
+                eprintln!("selection anchor node type {}", n.node_type());
                 break None;
             }
         };
@@ -639,91 +627,125 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
         let mut cursor = None;
         recurse_get_text(&mut cursor, &mut text, &sel, line.child_nodes());
 
-        // Check how much we need to deindent
-        let mut place_root = root.clone();
-        for ((indent_el, indent_el_index), indent) in &mut indents {
-            match &mut indent.type_ {
-                BlockType::BlockQuote => {
-                    let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) else {
-                        break;
-                    };
-                    text = suffix1.to_string();
-                    indent.text = PREFIX_BLOCKQUOTE.to_string();
-                },
-                BlockType::Ul => {
-                    if *indent_el_index == 0 {
-                        let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) else {
-                            break;
-                        };
-                        text = suffix1.to_string();
-                        indent.first_text = Some(PREFIX_UL_FIRST.to_string());
-                        indent.text = PREFIX_UL.to_string();
-                    } else {
-                        let Some(suffix1) = text.strip_prefix(PREFIX_UL) else {
-                            break;
-                        };
-                        text = suffix1.to_string();
-                        indent.text = PREFIX_UL.to_string();
-                    }
-                },
-                BlockType::Ol => {
-                    if *indent_el_index == 0 {
-                        let Ok(parsed) = ReOlNumberPrefix::from_str(&text) else {
-                            break;
-                        };
-                        text = parsed.suffix;
-                        indent.first_text = Some(parsed.number);
-                        indent.text = PREFIX_OL.to_string();
-                    } else {
-                        let Some(suffix1) = text.strip_prefix(PREFIX_OL) else {
-                            break;
-                        };
-                        text = suffix1.to_string();
-                        indent.text = PREFIX_OL.to_string();
-                    }
-                },
-                BlockType::BlockCode => unreachable!(),
-            }
-            place_root = indent_el.clone();
+        // Find default root
+        let mut place_before = line.next_sibling();
+        let mut place_parent = line.parent_element().unwrap();
+        while place_parent != root {
+            place_before = place_parent.next_sibling();
+            place_parent = place_parent.parent_element().unwrap();
         }
 
-        // Check if starting new prefixed block
-        let mut create_parents = vec![];
-        loop {
-            if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
-                text = suffix1.to_string();
-                create_parents.push(BlockType::BlockQuote);
-            } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
-                text = suffix1.to_string();
-                create_parents.push(BlockType::Ul);
-            } else if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
-                text = parsed.suffix;
-                create_parents.push(BlockType::Ol);
-            } else if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKCODE) {
-                text = suffix1.to_string();
-                create_parents.push(BlockType::BlockCode);
-                break;
-            } else {
-                break;
+        // If there's a context line
+        if let Some(context_line) = context_line {
+            // Determine context by walking previous line(/context)'s block parents up to root
+            let mut root_context_path = vec![];
+            let mut at_parent = context_line.parent_element().unwrap();
+            let mut next_child = context_line.next_sibling();
+            while at_parent != root {
+                let id = at_parent.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
+                root_context_path.push((at_parent.clone(), next_child, LineIndent {
+                    type_: serde_json::from_str::<BlockType>(
+                        &at_parent.get_attribute(ATTR_BLOCK_TYPE).unwrap(),
+                    ).unwrap(),
+                    source_indent: id,
+                    first_text: None,
+                    text: "".to_string(),
+                }));
+                next_child = at_parent.next_sibling();
+                at_parent = at_parent.parent_element().unwrap();
             }
-        }
+            root_context_path.reverse();
+            let context_children = context_line.child_nodes();
+            for (i, (_, _, block_indent)) in root_context_path.iter_mut().enumerate() {
+                let Some(line_indent_outer) = context_children.item(i as u32) else {
+                    continue;
+                };
+                let Some(line_indent_inner) = line_indent_outer.first_child() else {
+                    continue;
+                };
+                let Ok(line_indent_inner) = line_indent_inner.dyn_into::<Element>() else {
+                    continue;
+                };
+                block_indent.text = " ".repeat(line_indent_inner.text_content().unwrap().len());
+            }
 
-        // Move
-        let original_parent = line.parent_element().unwrap();
-        if place_root != original_parent || !create_parents.is_empty() {
+            // Find higest indent of previous/context this should be placed under by matching
+            // indents to line prefixes
             eprintln!(
-                "moving, parents equal {}, create parents empty {}",
-                place_root == original_parent,
-                create_parents.is_empty()
+                "matching context prefixes [{}] from root context path {:?}",
+                text,
+                root_context_path.iter().map(|x| (x.2.type_, &x.2.text)).collect::<Vec<_>>()
             );
-            changed = true;
+            for (parent, parent_next, mut indent) in root_context_path {
+                match &mut indent.type_ {
+                    BlockType::BlockQuote => {
+                        let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) else {
+                            break;
+                        };
+                        text = suffix1.to_string();
+                        indent.text = PREFIX_BLOCKQUOTE.to_string();
+                    },
+                    BlockType::Ul => {
+                        if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
+                            text = suffix1.to_string();
+                            indent.first_text = Some(PREFIX_UL_FIRST.to_string());
+                            indent.text = PREFIX_UL.to_string();
+                        } else if let Some(suffix1) = text.strip_prefix(&indent.text) {
+                            text = suffix1.to_string();
+                        } else {
+                            break;
+                        }
+                    },
+                    BlockType::Ol => {
+                        if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
+                            text = parsed.suffix;
+                            indent.text = " ".repeat(parsed.number.len());
+                            indent.first_text = Some(parsed.number);
+                        } else if let Some(suffix1) = text.strip_prefix(&indent.text) {
+                            text = suffix1.to_string();
+                        } else {
+                            break;
+                        }
+                    },
+                    BlockType::BlockCode => unreachable!(),
+                }
+                place_parent = parent;
+                place_before = parent_next;
+                build_indents.push(indent);
+            }
+        }
 
-            // * Lift up this line and following elements that are between this element and the
-            //   placement root.
-            //
-            // * Find the following element in the placement root.
-            let mut lift_following = vec![];
-            let place_before;
+        // Check if in a subtree of the placement root (and figure out the subpath indents)
+        //. console::log_3(&JsValue::from("is under place parent?"), &JsValue::from(&root), &JsValue::from(&place_parent));
+        let mut context_line_path = vec![];
+        let mut lift_following = vec![];
+        superif!({
+            let mut at_parent = line.parent_element().unwrap();
+            let mut next_child = line.next_sibling();
+            loop {
+                if at_parent == place_parent {
+                    break 'under_place_parent;
+                }
+                if at_parent == root {
+                    break;
+                }
+                let id = at_parent.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
+                context_line_path.push((at_parent.clone(), next_child, LineIndent {
+                    type_: serde_json::from_str::<BlockType>(
+                        &at_parent.get_attribute(ATTR_BLOCK_TYPE).unwrap(),
+                    ).unwrap(),
+                    source_indent: id,
+                    first_text: None,
+                    text: "".to_string(),
+                }));
+                next_child = at_parent.next_sibling();
+                at_parent = at_parent.parent_element().unwrap();
+            }
+        } 'under_place_parent {
+            context_line_path.reverse();
+
+            // Could be splitting a parent container; get list of following lines to drag
+            // along to placement root (and the split parents will be recreated later)
             shed!{
                 let mut lift_at = line.clone();
                 'lift_end : loop {
@@ -732,28 +754,30 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                         // Try to move forward
                         if let Some(lift_at_next) = lift_at.next_element_sibling() {
                             lift_at = lift_at_next;
-                            console::log_3(
-                                &JsValue::from(
-                                    &format!("lift_at 1, == {}", lift_at.parent_element().unwrap() == place_root),
-                                ),
-                                &JsValue::from(&place_root),
-                                &JsValue::from(&lift_at.parent_element().unwrap()),
-                            );
-                            if lift_at.parent_element().unwrap() == place_root {
+
+                            //.                            console::log_3(
+                            //.                                &JsValue::from(
+                            //.                                    &format!("lift_at 1, == {}", lift_at.parent_element().unwrap() == place_parent),
+                            //.                                ),
+                            //.                                &JsValue::from(&place_parent),
+                            //.                                &JsValue::from(&lift_at.parent_element().unwrap()),
+                            //.                            );
+                            if lift_at.parent_element().unwrap() == place_parent {
                                 // Reached root, stop
-                                place_before = Some(lift_at);
+                                place_before = Some(lift_at.dyn_into().unwrap());
                                 break 'lift_end;
                             }
                             break;
                         }
-                        console::log_3(
-                            &JsValue::from(
-                                &format!("lift_at 2, == {}", lift_at.parent_element().unwrap() == place_root),
-                            ),
-                            &JsValue::from(&place_root),
-                            &JsValue::from(&lift_at.parent_element().unwrap()),
-                        );
-                        if lift_at.parent_element().unwrap() == place_root {
+
+                        //.                        console::log_3(
+                        //.                            &JsValue::from(
+                        //.                                &format!("lift_at 2, == {}", lift_at.parent_element().unwrap() == place_parent),
+                        //.                            ),
+                        //.                            &JsValue::from(&place_parent),
+                        //.                            &JsValue::from(&lift_at.parent_element().unwrap()),
+                        //.                        );
+                        if lift_at.parent_element().unwrap() == place_parent {
                             // Reached root (no next element), stop
                             place_before = None;
                             break 'lift_end;
@@ -769,7 +793,113 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
                 }
             }
 
-            // Lift line + following elements
+            // Move placement parent down current line's tree by matching prefixes
+            eprintln!(
+                "matching line prefixes [{}] from context line path {:?}",
+                text,
+                context_line_path.iter().map(|x| (x.2.type_, &x.2.text)).collect::<Vec<_>>()
+            );
+            for (parent, parent_next, mut indent) in context_line_path {
+                match &mut indent.type_ {
+                    BlockType::BlockQuote => {
+                        let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) else {
+                            break;
+                        };
+                        text = suffix1.to_string();
+                        indent.text = PREFIX_BLOCKQUOTE.to_string();
+                    },
+                    BlockType::Ul => {
+                        if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
+                            text = suffix1.to_string();
+                            indent.first_text = Some(PREFIX_UL_FIRST.to_string());
+                            indent.text = PREFIX_UL.to_string();
+                        } else {
+                            break;
+                        }
+                    },
+                    BlockType::Ol => {
+                        if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
+                            text = parsed.suffix;
+                            indent.text = " ".repeat(parsed.number.len());
+                            indent.first_text = Some(parsed.number);
+                        } else {
+                            break;
+                        }
+                    },
+                    BlockType::BlockCode => unreachable!(),
+                }
+                place_parent = parent;
+                place_before = parent_next;
+                build_indents.push(indent);
+            }
+        });
+
+        // Check if starting new prefixed blocks
+        let mut create_parents = vec![];
+        loop {
+            if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
+                text = suffix1.to_string();
+                let type_ = BlockType::BlockQuote;
+                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_BLOCKQUOTE);
+                create_parents.push((parent, LineIndent {
+                    source_indent: parent_id,
+                    type_: BlockType::BlockQuote,
+                    first_text: None,
+                    text: PREFIX_BLOCKQUOTE.to_string(),
+                }));
+            } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
+                text = suffix1.to_string();
+                let type_ = BlockType::Ul;
+                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_UL);
+                create_parents.push((parent, LineIndent {
+                    source_indent: parent_id,
+                    type_: type_,
+                    first_text: Some(PREFIX_UL_FIRST.to_string()),
+                    text: PREFIX_UL.to_string(),
+                }));
+            } else if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
+                text = parsed.suffix;
+                let type_ = BlockType::Ol;
+                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_OL);
+                create_parents.push((parent, LineIndent {
+                    source_indent: parent_id,
+                    type_: type_,
+                    text: " ".repeat(parsed.number.len()),
+                    first_text: Some(parsed.number),
+                }));
+            } else if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKCODE) {
+                text = suffix1.to_string();
+                let type_ = BlockType::BlockCode;
+                let (parent_id, parent) = generate_el_block_indent(&mut ids.borrow_mut(), type_, CLASS_BLOCKCODE);
+                create_parents.push((parent, LineIndent {
+                    source_indent: parent_id,
+                    type_: type_,
+                    first_text: None,
+                    text: "".to_string(),
+                }));
+                break;
+            } else {
+                break;
+            }
+        }
+
+        // Move
+        let original_parent = line.parent_element().unwrap();
+        eprintln!(
+            "Line [{}]\nplace parent same {}, matched indents {:?}, create indents {:?}",
+            text,
+            place_parent == original_parent,
+            build_indents.iter().map(|p| format!("{:?}", p.type_)).collect::<Vec<_>>(),
+            create_parents.iter().map(|p| format!("{:?}", p.1.type_)).collect::<Vec<_>>()
+        );
+        console::log_2(
+            &JsValue::from("- place before"),
+            &place_before.as_ref().map(|x| JsValue::from(x)).unwrap_or_else(|| JsValue::from("none")),
+        );
+        if place_parent != original_parent || !create_parents.is_empty() {
+            changed = true;
+
+            // Lift line + any following elements between the line and the placement root
             line.remove();
             for e in &lift_following {
                 e.remove();
@@ -779,7 +909,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
             let mut clean_up_at = original_parent.clone();
             let mut clean_up_until = None;
             loop {
-                if clean_up_at == place_root {
+                if clean_up_at == place_parent {
                     break;
                 }
                 if clean_up_at.child_element_count() > 0 {
@@ -794,37 +924,24 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
 
             // Create blocks and place this line
             if create_parents.is_empty() {
-                place_root.insert_before(&line, place_before.as_ref().map(|x| x.deref())).unwrap();
+                place_parent.insert_before(&line, place_before.as_ref()).unwrap();
             } else {
-                let mut place_parent = place_root.clone();
-                for (depth, create_parent) in create_parents.into_iter().enumerate() {
-                    let new_parent = match create_parent {
-                        BlockType::BlockQuote => generate_el_block_indent(
-                            &mut ids.borrow_mut(),
-                            BlockType::BlockQuote,
-                            CLASS_BLOCKQUOTE,
-                        ).1,
-                        BlockType::Ul => generate_el_block_indent(&mut ids.borrow_mut(), BlockType::Ul, CLASS_UL).1,
-                        BlockType::Ol => generate_el_block_indent(&mut ids.borrow_mut(), BlockType::Ol, CLASS_OL).1,
-                        BlockType::BlockCode => generate_el_block_indent(
-                            &mut ids.borrow_mut(),
-                            BlockType::BlockCode,
-                            CLASS_BLOCKCODE,
-                        ).1,
-                    };
+                let mut place_parent = place_parent.clone();
+                for (depth, (new_parent, indent)) in create_parents.into_iter().enumerate() {
                     place_parent.insert_before(&new_parent, if depth == 0 {
-                        place_before.as_ref().map(|x| x.deref())
+                        place_before.as_ref()
                     } else {
                         None
                     }).unwrap();
                     place_parent = new_parent;
+                    build_indents.push(indent);
                 }
                 place_parent.append_child(&line).unwrap();
             }
 
             // Place remaining lines
             for e in lift_following {
-                place_root.insert_before(&e, place_before.as_ref().map(|x| x.deref())).unwrap();
+                place_parent.insert_before(&e, place_before.as_ref()).unwrap();
             }
         }
 
@@ -841,197 +958,192 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
             }
 
             // Parse inline
-            eprintln!("Parsing line [{}]", text);
-            let ast =
-                grammar::inline::InlineParser::new()
-                    .parse(&text)
-                    .unwrap()
-                    .get_first_tree()
-                    .unwrap()
-                    .build(&mut grammar::inline::DefaultBuilder::new())
-                    .unwrap_or_default();
-
-            trait OriginalText {
-                fn orig_text(&self) -> String;
-            }
-
-            impl OriginalText for grammar::inline_actions::StrongDelim {
-                fn orig_text(&self) -> String {
-                    return "*".to_string();
-                }
-            }
-
-            impl OriginalText for grammar::inline_actions::EmphasisDelim {
-                fn orig_text(&self) -> String {
-                    return "_".to_string();
-                }
-            }
-
-            impl OriginalText for grammar::inline_actions::CodeDelim {
-                fn orig_text(&self) -> String {
-                    return "`".to_string();
-                }
-            }
-
-            impl OriginalText for grammar::inline_actions::LinkTitlePrefix {
-                fn orig_text(&self) -> String {
-                    return "[".to_string();
-                }
-            }
-
-            impl OriginalText for grammar::inline_actions::LinkTitleSuffix {
-                fn orig_text(&self) -> String {
-                    return "]".to_string();
-                }
-            }
-
-            impl OriginalText for grammar::inline_actions::LinkAddressPrefix {
-                fn orig_text(&self) -> String {
-                    return "(".to_string();
-                }
-            }
-
-            impl OriginalText for grammar::inline_actions::LinkAddressSuffix {
-                fn orig_text(&self) -> String {
-                    return ")".to_string();
-                }
-            }
-
-            impl OriginalText for grammar::inline_actions::EscapeChar {
-                fn orig_text(&self) -> String {
-                    return "\\".to_string();
-                }
-            }
-
-            fn translate_ast(e: grammar::inline_actions::InlineEl) -> Inline {
-                match e {
-                    grammar::inline_actions::InlineEl::Strong(e) => {
-                        return Inline::Strong(InlineStrong {
-                            incomplete: e.suffix.is_none(),
-                            children: {
-                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
-                                for c in e.children.unwrap_or_default() {
-                                    out.push(translate_ast(c));
-                                }
-                                if let Some(suffix) = e.suffix {
-                                    out.push(Inline::Text(suffix.orig_text()));
-                                }
-                                out
-                            },
-                        });
-                    },
-                    grammar::inline_actions::InlineEl::Emphasis(e) => {
-                        return Inline::Emphasis(InlineEmphasis {
-                            incomplete: e.suffix.is_none(),
-                            children: {
-                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
-                                for c in e.children.unwrap_or_default() {
-                                    out.push(translate_ast(c));
-                                }
-                                if let Some(suffix) = e.suffix {
-                                    out.push(Inline::Text(suffix.orig_text()));
-                                }
-                                out
-                            },
-                        });
-                    },
-                    grammar::inline_actions::InlineEl::Link(e) => {
-                        let mut title = vec![];
-                        title.push(Inline::Text(e.title_prefix.orig_text()));
-                        for c in e.title.unwrap_or_default() {
-                            title.push(translate_ast(c));
-                        }
-                        let mut address = None;
-                        let mut incomplete = false;
-                        shed!{
-                            let Some(cont) = e.continuation else {
-                                incomplete = true;
-                                break;
-                            };
-                            title.push(Inline::Text(cont.title_suffix.orig_text()));
-                            let Some(addr) = cont.address else {
-                                incomplete = true;
-                                break;
-                            };
-                            let addr_suffix = if let Some(suffix) = addr.suffix {
-                                suffix.orig_text()
-                            } else {
-                                incomplete = true;
-                                "".to_string()
-                            };
-                            address = Some(InlineLinkAddress {
-                                prefix: addr.prefix.orig_text(),
-                                address: {
-                                    let mut out = String::new();
-                                    for c in addr.address.unwrap_or_default() {
-                                        match c {
-                                            grammar::inline_actions::LinkAddressChar::LinkAddressCharT(
-                                                c,
-                                            ) => out.push_str(
-                                                &c,
-                                            ),
-                                            grammar::inline_actions::LinkAddressChar::EscapedChar(c) => {
-                                                out.push_str(&c.prefix.orig_text());
-                                                out.push_str(&c.text);
-                                            },
-                                        }
-                                    }
-                                    out
-                                },
-                                suffix: addr_suffix,
-                            });
-                        };
-                        return Inline::Link(InlineLink {
-                            incomplete: incomplete,
-                            title: title,
-                            address: address,
-                        });
-                    },
-                    grammar::inline_actions::InlineEl::Code(e) => {
-                        return Inline::Code(InlineCode {
-                            incomplete: e.suffix.is_none(),
-                            text: {
-                                let mut out = String::new();
-                                for c in e.text.unwrap_or_default() {
-                                    match c {
-                                        grammar::inline_actions::CodeChar::CodeCharT(c) => out.push_str(&c),
-                                        grammar::inline_actions::CodeChar::EscapedChar(c) => {
-                                            out.push_str(&c.prefix.orig_text());
-                                            out.push_str(&c.text);
-                                        },
-                                    }
-                                }
-                                out
-                            },
-                        });
-                    },
-                    grammar::inline_actions::InlineEl::Text(e) => {
-                        let mut out = String::new();
-                        for c in e.text {
-                            match c {
-                                grammar::inline_actions::TextChar::TextCharT(c) => out.push_str(&c),
-                                grammar::inline_actions::TextChar::EscapedChar(c) => {
-                                    out.push_str(&c.prefix.orig_text());
-                                    out.push_str(&c.text);
-                                },
-                            }
-                        }
-                        return Inline::Text(out);
-                    },
-                }
-            }
-
-            let mut inline = vec![];
-            for e in ast {
-                inline.push(translate_ast(e));
-            }
-            sync_line(
-                &line,
-                cursor,
-                line_type,
-                &mut indents.into_iter().map(|(_, x)| x).collect::<Vec<_>>(),
-                inline,
-            );
+            //.            let ast =
+            //.                grammar::inline::InlineParser::new()
+            //.                    .parse(&text)
+            //.                    .unwrap()
+            //.                    .get_first_tree()
+            //.                    .unwrap()
+            //.                    .build(&mut grammar::inline::DefaultBuilder::new())
+            //.                    .unwrap_or_default();
+            //. 
+            //.            trait OriginalText {
+            //.                fn orig_text(&self) -> String;
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::StrongDelim {
+            //.                fn orig_text(&self) -> String {
+            //.                    return "*".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::EmphasisDelim {
+            //.                fn orig_text(&self) -> String {
+            //.                    return "_".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::CodeDelim {
+            //.                fn orig_text(&self) -> String {
+            //.                    return "`".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::LinkTitlePrefix {
+            //.                fn orig_text(&self) -> String {
+            //.                    return "[".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::LinkTitleSuffix {
+            //.                fn orig_text(&self) -> String {
+            //.                    return "]".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::LinkAddressPrefix {
+            //.                fn orig_text(&self) -> String {
+            //.                    return "(".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::LinkAddressSuffix {
+            //.                fn orig_text(&self) -> String {
+            //.                    return ")".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            impl OriginalText for grammar::inline_actions::EscapeChar {
+            //.                fn orig_text(&self) -> String {
+            //.                    return "\\".to_string();
+            //.                }
+            //.            }
+            //. 
+            //.            fn translate_ast(e: grammar::inline_actions::InlineEl) -> Inline {
+            //.                match e {
+            //.                    grammar::inline_actions::InlineEl::Strong(e) => {
+            //.                        return Inline::Strong(InlineStrong {
+            //.                            incomplete: e.suffix.is_none(),
+            //.                            children: {
+            //.                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
+            //.                                for c in e.children.unwrap_or_default() {
+            //.                                    out.push(translate_ast(c));
+            //.                                }
+            //.                                if let Some(suffix) = e.suffix {
+            //.                                    out.push(Inline::Text(suffix.orig_text()));
+            //.                                }
+            //.                                out
+            //.                            },
+            //.                        });
+            //.                    },
+            //.                    grammar::inline_actions::InlineEl::Emphasis(e) => {
+            //.                        return Inline::Emphasis(InlineEmphasis {
+            //.                            incomplete: e.suffix.is_none(),
+            //.                            children: {
+            //.                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
+            //.                                for c in e.children.unwrap_or_default() {
+            //.                                    out.push(translate_ast(c));
+            //.                                }
+            //.                                if let Some(suffix) = e.suffix {
+            //.                                    out.push(Inline::Text(suffix.orig_text()));
+            //.                                }
+            //.                                out
+            //.                            },
+            //.                        });
+            //.                    },
+            //.                    grammar::inline_actions::InlineEl::Link(e) => {
+            //.                        let mut title = vec![];
+            //.                        title.push(Inline::Text(e.title_prefix.orig_text()));
+            //.                        for c in e.title.unwrap_or_default() {
+            //.                            title.push(translate_ast(c));
+            //.                        }
+            //.                        let mut address = None;
+            //.                        let mut incomplete = false;
+            //.                        shed!{
+            //.                            let Some(cont) = e.continuation else {
+            //.                                incomplete = true;
+            //.                                break;
+            //.                            };
+            //.                            title.push(Inline::Text(cont.title_suffix.orig_text()));
+            //.                            let Some(addr) = cont.address else {
+            //.                                incomplete = true;
+            //.                                break;
+            //.                            };
+            //.                            let addr_suffix = if let Some(suffix) = addr.suffix {
+            //.                                suffix.orig_text()
+            //.                            } else {
+            //.                                incomplete = true;
+            //.                                "".to_string()
+            //.                            };
+            //.                            address = Some(InlineLinkAddress {
+            //.                                prefix: addr.prefix.orig_text(),
+            //.                                address: {
+            //.                                    let mut out = String::new();
+            //.                                    for c in addr.address.unwrap_or_default() {
+            //.                                        match c {
+            //.                                            grammar::inline_actions::LinkAddressChar::LinkAddressCharT(
+            //.                                                c,
+            //.                                            ) => out.push_str(
+            //.                                                &c,
+            //.                                            ),
+            //.                                            grammar::inline_actions::LinkAddressChar::EscapedChar(c) => {
+            //.                                                out.push_str(&c.prefix.orig_text());
+            //.                                                out.push_str(&c.text);
+            //.                                            },
+            //.                                        }
+            //.                                    }
+            //.                                    out
+            //.                                },
+            //.                                suffix: addr_suffix,
+            //.                            });
+            //.                        };
+            //.                        return Inline::Link(InlineLink {
+            //.                            incomplete: incomplete,
+            //.                            title: title,
+            //.                            address: address,
+            //.                        });
+            //.                    },
+            //.                    grammar::inline_actions::InlineEl::Code(e) => {
+            //.                        return Inline::Code(InlineCode {
+            //.                            incomplete: e.suffix.is_none(),
+            //.                            text: {
+            //.                                let mut out = String::new();
+            //.                                for c in e.text.unwrap_or_default() {
+            //.                                    match c {
+            //.                                        grammar::inline_actions::CodeChar::CodeCharT(c) => out.push_str(&c),
+            //.                                        grammar::inline_actions::CodeChar::EscapedChar(c) => {
+            //.                                            out.push_str(&c.prefix.orig_text());
+            //.                                            out.push_str(&c.text);
+            //.                                        },
+            //.                                    }
+            //.                                }
+            //.                                out
+            //.                            },
+            //.                        });
+            //.                    },
+            //.                    grammar::inline_actions::InlineEl::Text(e) => {
+            //.                        let mut out = String::new();
+            //.                        for c in e.text {
+            //.                            match c {
+            //.                                grammar::inline_actions::TextChar::TextCharT(c) => out.push_str(&c),
+            //.                                grammar::inline_actions::TextChar::EscapedChar(c) => {
+            //.                                    out.push_str(&c.prefix.orig_text());
+            //.                                    out.push_str(&c.text);
+            //.                                },
+            //.                            }
+            //.                        }
+            //.                        return Inline::Text(out);
+            //.                    },
+            //.                }
+            //.            }
+            //. 
+            //.             let mut inline = vec![];
+            //.           for e in ast {
+            //.           inline.push(translate_ast(e));
+            //.     }
+            eprintln!("syncing line, cursor {:?}", cursor);
+            let inline = vec![Inline::Text(text)];
+            sync_line(&line, cursor, line_type, &mut build_indents, inline);
         }
 
         // Continue until nothing changes
@@ -1041,7 +1153,7 @@ fn update_lines_starting_at(ids: &Rc<RefCell<usize>>, mut line: Element) {
         let Some(at1) = get_line_forward(&line, MoveMode::Exclusive) else {
             break;
         };
-        previous_line = Some(line);
+        context_line = Some(line);
         line = at1;
     }
 }
