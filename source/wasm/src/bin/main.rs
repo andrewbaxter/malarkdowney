@@ -53,6 +53,7 @@ use {
     },
     web_sys::{
         console,
+        CharacterData,
         Element,
         HtmlElement,
         MutationObserver,
@@ -483,10 +484,9 @@ struct ReOlNumberPrefix {
     suffix: String,
 }
 
-#[structre("^(?<level>#{1,6}) (?<suffix>.*)$")]
+#[structre("^(?<level>#{1,6}) ")]
 struct ReHeadingPrefix {
     level: String,
-    suffix: String,
 }
 
 fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str) -> (usize, Element) {
@@ -550,11 +550,30 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
                     ),
                     &JsValue::from(&n),
                 );
-                let Some(child) = n.child_nodes().item(sel.anchor_offset()) else {
-                    // Spec vague, not sure what happens to cause this
-                    break None;
-                };
-                break (Some((child, 0)));
+                if sel.anchor_offset() == 0 {
+                    break Some((n, 0));
+                }
+
+                fn find_last_text_node(at: &Node) -> Option<Node> {
+                    let children = at.child_nodes();
+                    for i in (0 .. children.length()).rev() {
+                        let child = children.item(i).unwrap();
+                        if let Some(_) = child.dyn_ref::<CharacterData>() {
+                            return Some(child);
+                        }
+                        if let Some(found) = find_last_text_node(&child) {
+                            return Some(found);
+                        }
+                    }
+                    return None;
+                }
+
+                if let Some(child) = find_last_text_node(&n.child_nodes().item(sel.anchor_offset() - 1).unwrap()) {
+                    let text_len = child.text_content().unwrap().len();
+                    break Some((child, text_len));
+                } else {
+                    break Some((n, 0));
+                }
             } else {
                 eprintln!("selection anchor node type {}", n.node_type());
                 break None;
@@ -585,7 +604,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
         let mut text = String::new();
         let mut cursor = None;
         recurse_get_text(&mut cursor, &mut text, &sel, line.child_nodes());
-        eprintln!("Line! Text [{}]", text);
+        eprintln!("Line! Text [{}], cursor {:?}", text, cursor);
 
         // Find default root
         let mut place_before = line.next_sibling();
@@ -889,7 +908,6 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
             // Parse line type
             let line_type;
             if let Ok(parsed) = ReHeadingPrefix::from_str(&text) {
-                text = parsed.suffix;
                 let heading_level = parsed.level.len();
                 line_type = LineType::Heading(heading_level);
             } else {

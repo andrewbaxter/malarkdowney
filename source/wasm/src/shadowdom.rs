@@ -78,7 +78,7 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
 
     match want {
         ShadowDom::Text(want) => {
-            match have.dyn_ref::<Text>() {
+            let have = match have.dyn_ref::<Text>() {
                 Some(have) => {
                     if have.text_content().unwrap() != want {
                         console::log_2(
@@ -93,29 +93,34 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                         );
                         have.set_text_content(Some(&want));
                     }
-                    shed!{
-                        let Some(cursor) = cursor.take_if(|cursor| offset.get() + want.len() >= *cursor) else {
-                            break;
-                        };
-                        let rel_offset = cursor - offset.get();
-                        console::log_2(
-                            &JsValue::from(&format!("sync dom - set sel at rel offset {}", rel_offset)),
-                            &JsValue::from(have),
-                        );
-                        let sel = window().get_selection().unwrap().unwrap();
-                        sel.remove_all_ranges().unwrap();
-                        let range = document().create_range().unwrap();
-                        range.set_start(&have, rel_offset as u32).unwrap();
-                        range.set_end(&have, rel_offset as u32).unwrap();
-                        sel.add_range(&range).unwrap();
-                    };
-                    offset.set(offset.get() + want.len());
+                    have.clone()
                 },
                 None => {
                     eprintln!("sync dom - not text; replacing text (was not text) [{}]", want);
-                    replace(have, &generate_shadow_dom(offset, ShadowDom::Text(want)));
+                    let new = document().create_text_node(&want);
+                    replace(have, new.dyn_ref().unwrap());
+                    new
                 },
             };
+            shed!{
+                let Some(cursor) = cursor.take_if(|cursor| offset.get() + want.len() >= *cursor) else {
+                    break;
+                };
+                let rel_offset = cursor - offset.get();
+                console::log_2(
+                    &JsValue::from(
+                        &format!("sync dom - set sel at rel offset {} ({} - {})", rel_offset, cursor, offset.get()),
+                    ),
+                    &JsValue::from(&have),
+                );
+                let sel = window().get_selection().unwrap().unwrap();
+                sel.remove_all_ranges().unwrap();
+                let range = document().create_range().unwrap();
+                range.set_start(&have, rel_offset as u32).unwrap();
+                range.set_end(&have, rel_offset as u32).unwrap();
+                sel.add_range(&range).unwrap();
+            };
+            offset.set(offset.get() + want.len());
         },
         ShadowDom::Element(want) => {
             let have = superif!({
@@ -128,8 +133,9 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                 break have.clone();
             } 'mismatch {
                 eprintln!("sync dom - not el or wrong tag; replacing el, wanted tag {}", want.tag);
-                replace(have, &generate_shadow_dom(offset, ShadowDom::Element(want)));
-                return;
+                let have1 = document().create_element(want.tag).unwrap();
+                replace(have, &have1);
+                break have1;
             });
 
             // Sync attrs
