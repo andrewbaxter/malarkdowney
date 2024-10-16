@@ -15,16 +15,12 @@ use {
             window,
         },
     },
-    js_sys::{
-        Array,
-        WeakMap,
-    },
+    js_sys::Array,
     rooting::{
         el,
         el_from_raw,
         set_root,
     },
-    rustemo::Parser,
     serde::{
         Deserialize,
         Serialize,
@@ -49,6 +45,10 @@ use {
             ScanDirection,
             ScanInclusivity,
         },
+        linemarkdown::{
+            self,
+            Inline,
+        },
         shadowdom::{
             generate_shadow_dom,
             sync_shadow_dom,
@@ -58,7 +58,6 @@ use {
     },
     wasm_bindgen::{
         closure::Closure,
-        convert::IntoWasmAbi,
         JsCast,
         JsValue,
     },
@@ -72,7 +71,6 @@ use {
         MutationObserverInit,
         MutationRecord,
         Node,
-        NodeList,
     },
 };
 
@@ -83,16 +81,6 @@ macro_rules! eprintln{
     ($pat: literal, $($data: expr), *) => {
         web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!($pat, $($data,) *)))
     };
-}
-
-mod grammar {
-    pub(crate) mod inline {
-        include!(concat!(env!("OUT_DIR"), "/inline/inline.rs"));
-    }
-
-    pub(crate) mod inline_actions {
-        include!(concat!(env!("OUT_DIR"), "/inline/inline_actions.rs"));
-    }
 }
 
 const NAMESPACE: &str = "malarkdowney";
@@ -137,44 +125,6 @@ fn css_id_block(id: usize) -> String {
     return format!("{}_indent_{}", NAMESPACE, id);
 }
 
-pub struct InlineStrong {
-    pub incomplete: bool,
-    pub children: Vec<Inline>,
-}
-
-pub struct InlineEmphasis {
-    pub incomplete: bool,
-    pub children: Vec<Inline>,
-}
-
-pub struct InlineLink {
-    pub incomplete: bool,
-    // `[..]`
-    pub title: Vec<Inline>,
-    pub address: Option<InlineLinkAddress>,
-}
-
-pub struct InlineLinkAddress {
-    // `(`
-    pub prefix: String,
-    pub address: String,
-    // `)`
-    pub suffix: String,
-}
-
-pub struct InlineCode {
-    pub incomplete: bool,
-    pub text: String,
-}
-
-pub enum Inline {
-    Text(String),
-    Strong(InlineStrong),
-    Emphasis(InlineEmphasis),
-    Link(InlineLink),
-    Code(InlineCode),
-}
-
 pub enum Block {
     Heading(usize, Vec<Inline>),
     Line(Vec<Inline>),
@@ -215,7 +165,7 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                     classes: {
                         let mut out = HashSet::new();
                         out.insert(CLASS_NAMESPACE.to_string());
-                        if want.incomplete {
+                        if want.end_delim.is_none() {
                             out.insert(CLASS_INCOMPLETE.to_string());
                         }
                         out
@@ -223,8 +173,12 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                     attrs: Default::default(),
                     children: {
                         let mut out = vec![];
+                        out.push(ShadowDom::Text(want.begin_delim));
                         for c in want.children {
                             out.push(generate_inline(c));
+                        }
+                        if let Some(end_delim) = want.end_delim {
+                            out.push(ShadowDom::Text(end_delim));
                         }
                         out
                     },
@@ -236,7 +190,7 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                     classes: {
                         let mut out = HashSet::new();
                         out.insert(CLASS_NAMESPACE.to_string());
-                        if want.incomplete {
+                        if want.end_delim.is_none() {
                             out.insert(CLASS_INCOMPLETE.to_string());
                         }
                         out
@@ -244,8 +198,12 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                     attrs: Default::default(),
                     children: {
                         let mut out = vec![];
+                        out.push(ShadowDom::Text(want.begin_delim));
                         for c in want.children {
                             out.push(generate_inline(c));
+                        }
+                        if let Some(end_delim) = want.end_delim {
+                            out.push(ShadowDom::Text(end_delim));
                         }
                         out
                     },
@@ -266,22 +224,29 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                     attrs: Default::default(),
                     children: {
                         let mut out = vec![];
+                        out.push(ShadowDom::Text(want.title_begin_delim));
                         for c in want.title {
                             out.push(generate_inline(c));
                         }
-                        if let Some(address) = want.address {
-                            out.push(ShadowDom::Element(ShadowDomElement {
-                                tag: "a",
-                                classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
-                                attrs: {
-                                    let mut out = HashMap::new();
-                                    out.insert("href".to_string(), address.address.clone());
-                                    out
-                                },
-                                children: vec![
-                                    ShadowDom::Text(format!("{}{}{}", address.prefix, address.address, address.suffix))
-                                ],
-                            }));
+                        if let Some(continuation) = want.continuation {
+                            out.push(ShadowDom::Text(continuation.title_end_delim));
+                            if let Some(address) = continuation.address {
+                                out.push(ShadowDom::Element(ShadowDomElement {
+                                    tag: "a",
+                                    classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
+                                    attrs: {
+                                        let mut out = HashMap::new();
+                                        out.insert("spellcheck".to_string(), "false".to_string());
+                                        out.insert("href".to_string(), address.address.clone());
+                                        out
+                                    },
+                                    children: vec![
+                                        ShadowDom::Text(
+                                            format!("{}{}{}", address.begin_delim, address.address, address.end_delim),
+                                        )
+                                    ],
+                                }));
+                            }
                         }
                         out
                     },
@@ -298,7 +263,11 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                         }
                         out
                     },
-                    attrs: Default::default(),
+                    attrs: {
+                        let mut out = HashMap::new();
+                        out.insert("spellcheck".to_string(), "false".to_string());
+                        out
+                    },
                     children: vec![ShadowDom::Text(want.text)],
                 });
             },
@@ -860,201 +829,18 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             }
 
             // Parse inline
-            //.            let ast =
-            //.                grammar::inline::InlineParser::new()
-            //.                    .parse(&text)
-            //.                    .unwrap()
-            //.                    .get_first_tree()
-            //.                    .unwrap()
-            //.                    .build(&mut grammar::inline::DefaultBuilder::new())
-            //.                    .unwrap_or_default();
-            //. 
-            //.            trait OriginalText {
-            //.                fn orig_text(&self) -> String;
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::StrongDelim {
-            //.                fn orig_text(&self) -> String {
-            //.                    return "*".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::EmphasisDelim {
-            //.                fn orig_text(&self) -> String {
-            //.                    return "_".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::CodeDelim {
-            //.                fn orig_text(&self) -> String {
-            //.                    return "`".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::LinkTitlePrefix {
-            //.                fn orig_text(&self) -> String {
-            //.                    return "[".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::LinkTitleSuffix {
-            //.                fn orig_text(&self) -> String {
-            //.                    return "]".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::LinkAddressPrefix {
-            //.                fn orig_text(&self) -> String {
-            //.                    return "(".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::LinkAddressSuffix {
-            //.                fn orig_text(&self) -> String {
-            //.                    return ")".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            impl OriginalText for grammar::inline_actions::EscapeChar {
-            //.                fn orig_text(&self) -> String {
-            //.                    return "\\".to_string();
-            //.                }
-            //.            }
-            //. 
-            //.            fn translate_ast(e: grammar::inline_actions::InlineEl) -> Inline {
-            //.                match e {
-            //.                    grammar::inline_actions::InlineEl::Strong(e) => {
-            //.                        return Inline::Strong(InlineStrong {
-            //.                            incomplete: e.suffix.is_none(),
-            //.                            children: {
-            //.                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
-            //.                                for c in e.children.unwrap_or_default() {
-            //.                                    out.push(translate_ast(c));
-            //.                                }
-            //.                                if let Some(suffix) = e.suffix {
-            //.                                    out.push(Inline::Text(suffix.orig_text()));
-            //.                                }
-            //.                                out
-            //.                            },
-            //.                        });
-            //.                    },
-            //.                    grammar::inline_actions::InlineEl::Emphasis(e) => {
-            //.                        return Inline::Emphasis(InlineEmphasis {
-            //.                            incomplete: e.suffix.is_none(),
-            //.                            children: {
-            //.                                let mut out = vec![Inline::Text(e.prefix.orig_text())];
-            //.                                for c in e.children.unwrap_or_default() {
-            //.                                    out.push(translate_ast(c));
-            //.                                }
-            //.                                if let Some(suffix) = e.suffix {
-            //.                                    out.push(Inline::Text(suffix.orig_text()));
-            //.                                }
-            //.                                out
-            //.                            },
-            //.                        });
-            //.                    },
-            //.                    grammar::inline_actions::InlineEl::Link(e) => {
-            //.                        let mut title = vec![];
-            //.                        title.push(Inline::Text(e.title_prefix.orig_text()));
-            //.                        for c in e.title.unwrap_or_default() {
-            //.                            title.push(translate_ast(c));
-            //.                        }
-            //.                        let mut address = None;
-            //.                        let mut incomplete = false;
-            //.                        shed!{
-            //.                            let Some(cont) = e.continuation else {
-            //.                                incomplete = true;
-            //.                                break;
-            //.                            };
-            //.                            title.push(Inline::Text(cont.title_suffix.orig_text()));
-            //.                            let Some(addr) = cont.address else {
-            //.                                incomplete = true;
-            //.                                break;
-            //.                            };
-            //.                            let addr_suffix = if let Some(suffix) = addr.suffix {
-            //.                                suffix.orig_text()
-            //.                            } else {
-            //.                                incomplete = true;
-            //.                                "".to_string()
-            //.                            };
-            //.                            address = Some(InlineLinkAddress {
-            //.                                prefix: addr.prefix.orig_text(),
-            //.                                address: {
-            //.                                    let mut out = String::new();
-            //.                                    for c in addr.address.unwrap_or_default() {
-            //.                                        match c {
-            //.                                            grammar::inline_actions::LinkAddressChar::LinkAddressCharT(
-            //.                                                c,
-            //.                                            ) => out.push_str(
-            //.                                                &c,
-            //.                                            ),
-            //.                                            grammar::inline_actions::LinkAddressChar::EscapedChar(c) => {
-            //.                                                out.push_str(&c.prefix.orig_text());
-            //.                                                out.push_str(&c.text);
-            //.                                            },
-            //.                                        }
-            //.                                    }
-            //.                                    out
-            //.                                },
-            //.                                suffix: addr_suffix,
-            //.                            });
-            //.                        };
-            //.                        return Inline::Link(InlineLink {
-            //.                            incomplete: incomplete,
-            //.                            title: title,
-            //.                            address: address,
-            //.                        });
-            //.                    },
-            //.                    grammar::inline_actions::InlineEl::Code(e) => {
-            //.                        return Inline::Code(InlineCode {
-            //.                            incomplete: e.suffix.is_none(),
-            //.                            text: {
-            //.                                let mut out = String::new();
-            //.                                for c in e.text.unwrap_or_default() {
-            //.                                    match c {
-            //.                                        grammar::inline_actions::CodeChar::CodeCharT(c) => out.push_str(&c),
-            //.                                        grammar::inline_actions::CodeChar::EscapedChar(c) => {
-            //.                                            out.push_str(&c.prefix.orig_text());
-            //.                                            out.push_str(&c.text);
-            //.                                        },
-            //.                                    }
-            //.                                }
-            //.                                out
-            //.                            },
-            //.                        });
-            //.                    },
-            //.                    grammar::inline_actions::InlineEl::Text(e) => {
-            //.                        let mut out = String::new();
-            //.                        for c in e.text {
-            //.                            match c {
-            //.                                grammar::inline_actions::TextChar::TextCharT(c) => out.push_str(&c),
-            //.                                grammar::inline_actions::TextChar::EscapedChar(c) => {
-            //.                                    out.push_str(&c.prefix.orig_text());
-            //.                                    out.push_str(&c.text);
-            //.                                },
-            //.                            }
-            //.                        }
-            //.                        return Inline::Text(out);
-            //.                    },
-            //.                }
-            //.            }
-            //. 
-            //.             let mut inline = vec![];
-            //.           for e in ast {
-            //.           inline.push(translate_ast(e));
-            //.     }
-            eprintln!("syncing line, cursor {:?}", cursor);
-            let inline = vec![Inline::Text(text)];
-            {
-                let offset = Cell::new(0usize);
-                line =
-                    sync_shadow_dom(
-                        &mut cursor,
-                        &offset,
-                        &line,
-                        generate_line_shadowdom(line_type, &mut indents, inline),
-                    );
-            }
+            let inline = linemarkdown::parse(&text);
+            eprintln!("parsed inline: {:?}", inline);
+
+            // Generate and sync
+            let offset = Cell::new(0usize);
+            line =
+                sync_shadow_dom(
+                    &mut cursor,
+                    &offset,
+                    &line,
+                    generate_line_shadowdom(line_type, &mut indents, inline),
+                );
         }
 
         // Update indents
