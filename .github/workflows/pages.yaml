@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - run: cargo install wasm-bindgen-cli
+      - run: cargo install -f wasm-bindgen-cli --version 0.2.93
       - run: rustup target add wasm32-unknown-unknown
       - run: cd source && ./build.sh
       - id: pages
