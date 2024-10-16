@@ -1,3 +1,3 @@
-Malarkdowney is an inline markdown editor.
+Malarkdowney is an inline visual markdown editor.
 
-[Try it out here](x)!
+[Try it out here](https://andrewbaxter.github.io/malarkdowney/)!

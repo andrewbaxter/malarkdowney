@@ -4,21 +4,21 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>malarkdowney</title>
-    <link rel="stylesheet" href="/malarkdowney.css" />
-    <link rel="stylesheet" href="/style.css" />
+    <link rel="stylesheet" href="malarkdowney.css" />
+    <link rel="stylesheet" href="style.css" />
     <link
       rel="preload"
-      href="/main_bg.wasm"
+      href="main_bg.wasm"
       as="fetch"
       type="application/wasm"
       crossorigin=""
     />
-    <link rel="modulepreload" href="/main.js" />
+    <link rel="modulepreload" href="main.js" />
   </head>
   <body>
     <script type="module">
-      import init from "/main.js";
-      init("/main_bg.wasm");
+      import init from "main.js";
+      init("main_bg.wasm");
     </script>
   </body>
 </html>
