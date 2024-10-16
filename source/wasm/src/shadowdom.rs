@@ -1,11 +1,11 @@
 use {
+    crate::dom,
     flowcontrol::{
         shed,
         superif,
     },
     gloo::utils::{
         document,
-        window,
     },
     std::{
         cell::Cell,
@@ -71,7 +71,7 @@ pub fn generate_shadow_dom(offset: &Cell<usize>, want: ShadowDom) -> Node {
     }
 }
 
-pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &Node, want: ShadowDom) {
+pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &Node, want: ShadowDom) -> Node {
     fn replace(old: &Node, new: &Node) {
         old.parent_node().unwrap().replace_child(new, old).unwrap();
     }
@@ -113,14 +113,10 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                     ),
                     &JsValue::from(&have),
                 );
-                let sel = window().get_selection().unwrap().unwrap();
-                sel.remove_all_ranges().unwrap();
-                let range = document().create_range().unwrap();
-                range.set_start(&have, rel_offset as u32).unwrap();
-                range.set_end(&have, rel_offset as u32).unwrap();
-                sel.add_range(&range).unwrap();
+                dom::select(&have, rel_offset);
             };
             offset.set(offset.get() + want.len());
+            return have.dyn_into().unwrap();
         },
         ShadowDom::Element(want) => {
             let have = superif!({
@@ -246,6 +242,7 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                 );
                 sync_shadow_dom(cursor, offset, &child, want_child);
             }
+            return have.dyn_into().unwrap();
         },
     }
 }

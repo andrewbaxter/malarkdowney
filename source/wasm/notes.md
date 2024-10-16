@@ -1,3 +1,10 @@
+# Contenteditable
+
+Contenteditable has this behavior:
+
+- Making a new line in a block element will create a new text element with `<br>` before it
+- Making a new line in an inline element will create a duplicate chain of elements up to the nearest block element and place it after the current element
+
 # Re-placing lines
 
 If indentation changes, a line may be moved to a different indent-block.

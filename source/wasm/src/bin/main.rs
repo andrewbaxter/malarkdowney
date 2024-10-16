@@ -5,6 +5,10 @@ use {
         superif,
     },
     gloo::{
+        events::{
+            EventListener,
+            EventListenerOptions,
+        },
         timers::callback::Timeout,
         utils::{
             document,
@@ -39,11 +43,18 @@ use {
         str::FromStr,
     },
     structre::structre,
-    wasm::shadowdom::{
-        generate_shadow_dom,
-        sync_shadow_dom,
-        ShadowDom,
-        ShadowDomElement,
+    wasm::{
+        dom::{
+            self,
+            ScanDirection,
+            ScanInclusivity,
+        },
+        shadowdom::{
+            generate_shadow_dom,
+            sync_shadow_dom,
+            ShadowDom,
+            ShadowDomElement,
+        },
     },
     wasm_bindgen::{
         closure::Closure,
@@ -56,6 +67,7 @@ use {
         CharacterData,
         Element,
         HtmlElement,
+        KeyboardEvent,
         MutationObserver,
         MutationObserverInit,
         MutationRecord,
@@ -91,13 +103,13 @@ const CLASS_NAMESPACE: &str = NAMESPACE;
 const CLASS_ROOT: &str = formatcp!("{}_root", NAMESPACE);
 const CLASS_INCOMPLETE: &str = formatcp!("{}_incomplete", NAMESPACE);
 const CLASS_ALIGNED: &str = formatcp!("{}_aligned", NAMESPACE);
-const CLASS_BLOCK_INDENT: &str = formatcp!("{}_block_indent", NAMESPACE);
+const CLASS_BLOCK: &str = formatcp!("{}_block", NAMESPACE);
 const CLASS_LINE: &str = formatcp!("{}_line", NAMESPACE);
-const CLASS_BLOCKCODE: &str = formatcp!("{}_blockcode", NAMESPACE);
-const CLASS_BLOCKQUOTE: &str = formatcp!("{}_blockquote", NAMESPACE);
-const CLASS_UL: &str = formatcp!("{}_ul", NAMESPACE);
-const CLASS_OL: &str = formatcp!("{}_ol", NAMESPACE);
-const CLASS_PSEUDO_A: &str = formatcp!("{}_pseudo_a", NAMESPACE);
+const CLASS_BLOCKCODE: &str = formatcp!("{}_block_code", NAMESPACE);
+const CLASS_BLOCKQUOTE: &str = formatcp!("{}_block_quote", NAMESPACE);
+const CLASS_UL: &str = formatcp!("{}_block_ul", NAMESPACE);
+const CLASS_OL: &str = formatcp!("{}_block_ol", NAMESPACE);
+const CLASS_PSEUDO_A: &str = formatcp!("{}_inline_pseudo_a", NAMESPACE);
 const PREFIX_UL_FIRST: &str = "* ";
 const PREFIX_UL: &str = "   ";
 const PREFIX_BLOCKQUOTE: &str = "> ";
@@ -351,7 +363,7 @@ fn set_indent(root: &Element, indent_block: Element, aligned: &Vec<Element>, wid
             let Ok(child) = children.item(i).unwrap().dyn_into::<Element>() else {
                 continue;
             };
-            if recurse && child.class_list().contains(CLASS_BLOCK_INDENT) {
+            if recurse && child.class_list().contains(CLASS_BLOCK) {
                 do_recurse(root_left, &child, None, recurse);
             }
         }
@@ -372,110 +384,41 @@ fn get_aligned_max_width(aligned: &Vec<Element>) -> f32 {
     return max_width;
 }
 
-#[derive(PartialEq)]
-enum MoveMode {
-    Inclusive,
-    Exclusive,
+fn is_line(node: &Node) -> bool {
+    let Some(parent) = node.parent_element() else {
+        return false;
+    };
+    let parent_classes = parent.class_list();
+    if parent_classes.contains(CLASS_BLOCK) || parent_classes.contains(CLASS_ROOT) {
+        return true;
+    }
+    return false;
 }
 
-fn get_line_backwards(n: &Node, mode: MoveMode) -> Option<Element> {
-    let mut skip_first_next = mode == MoveMode::Inclusive;
-    let mut at = n.clone();
-    loop {
-        loop {
-            // Move backward
-            if skip_first_next {
-                skip_first_next = false;
-            } else {
-                let Some(at_temp) = at.previous_sibling() else {
-                    // (move up)
-                    break;
-                };
-                at = at_temp;
-            }
-
-            // Match or move down
-            loop {
-                let Some(at_el) = at.dyn_ref::<Element>() else {
-                    break;
-                };
-                let class_list = at_el.class_list();
-
-                // Match
-                if class_list.contains(CLASS_LINE) {
-                    return Some(at_el.clone());
-                }
-
-                // Or move down
-                let Some(at_temp) = at_el.last_child() else {
-                    // (no children, try moving backwards again)
-                    break;
-                };
-                at = at_temp;
-            }
-        }
-
-        // Move up
-        {
-            let Some(at_temp) = at.parent_node() else {
-                return None;
-            };
-            at = at_temp;
-        }
-        if at.dyn_ref::<Element>().unwrap().class_list().contains(CLASS_ROOT) {
-            return None;
-        }
-    }
+fn is_root(at: &Node) -> bool {
+    return at.dyn_ref::<Element>().unwrap().class_list().contains(CLASS_ROOT);
 }
 
-fn get_line_forward(n: &Node, mode: MoveMode) -> Option<Element> {
-    let mut skip_first_next = mode == MoveMode::Inclusive;
-    let mut at = n.clone();
-    loop {
-        loop {
-            // Move forward
-            if skip_first_next {
-                skip_first_next = false;
-            } else {
-                let Some(at_temp) = at.next_sibling() else {
-                    // (move up)
-                    break;
-                };
-                at = at_temp;
-            }
-
-            // Match or move down
-            loop {
-                let Some(at_el) = at.dyn_ref::<Element>() else {
-                    break;
-                };
-                let class_list = at_el.class_list();
-
-                // Match
-                if class_list.contains(CLASS_LINE) {
-                    return Some(at_el.clone());
-                }
-
-                // Or move down
-                let Some(at_temp) = at.first_child() else {
-                    // (no children, try moving backwards again)
-                    break;
-                };
-                at = at_temp;
-            }
+fn line_scan(start: &Node, direction: ScanDirection, inclusivity: ScanInclusivity) -> Option<Node> {
+    fn is_match(at: &Node) -> bool {
+        let Some(parent) = at.parent_element() else {
+            return false;
+        };
+        if !parent.class_list().contains(CLASS_BLOCK) {
+            return false;
         }
-
-        // Move up
-        {
-            let Some(at_temp) = at.parent_node() else {
-                return None;
-            };
-            at = at_temp;
-        }
-        if at.dyn_ref::<Element>().unwrap().class_list().contains(CLASS_ROOT) {
-            return None;
+        if let Some(at_el) = at.dyn_ref::<Element>() {
+            let class_list = at_el.class_list();
+            if !class_list.contains(CLASS_BLOCK) {
+                return true;
+            }
+            return false;
+        } else {
+            return true;
         }
     }
+
+    return dom::scan(start, is_root, is_match, direction, inclusivity);
 }
 
 #[structre("^(?<number>\\d+\\. )(?<suffix>.*)$")]
@@ -492,7 +435,7 @@ struct ReHeadingPrefix {
 fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str) -> (usize, Element) {
     let d = document();
     let e = d.create_element("div").unwrap();
-    e.class_list().add_2(CLASS_BLOCK_INDENT, type_class).unwrap();
+    e.class_list().add_2(CLASS_BLOCK, type_class).unwrap();
     let id = *ids;
     *ids += 1;
     e.set_id(&css_id_block(id));
@@ -505,13 +448,15 @@ struct UpdateLinesStartingAtCtx {
     ids: Rc<RefCell<usize>>,
 }
 
-fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Element) {
-    let mut context_line = get_line_backwards(&line, MoveMode::Exclusive);
+fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) {
+    let mut context_line = line_scan(&line, ScanDirection::Backward, ScanInclusivity::Exclusive);
 
     // Locate root
     let root;
     {
-        let mut parent_at = line.clone();
+        let Some(mut parent_at) = line.parent_element() else {
+            return;
+        };
         while !parent_at.class_list().contains(CLASS_ROOT) {
             let Some(temp) = parent_at.parent_element() else {
                 // Looking at unrooted element?
@@ -581,29 +526,29 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
         };
 
         fn recurse_get_text(
+            n: &Node,
             out_cursor: &mut Option<usize>,
             out_text: &mut String,
             sel: &Option<(Node, usize)>,
-            nodes: NodeList,
         ) {
-            for i in 0 .. nodes.length() {
-                let n = nodes.item(i).unwrap();
-                if let Some((sel_n, sel_offset)) = sel {
-                    if *sel_n == n {
-                        *out_cursor = Some(out_text.len() + sel_offset);
-                    }
+            if let Some((sel_n, sel_offset)) = sel {
+                if sel_n == n {
+                    *out_cursor = Some(out_text.len() + sel_offset);
                 }
-                if n.node_type() == Node::TEXT_NODE {
-                    out_text.push_str(&n.node_value().unwrap());
-                } else if n.node_type() == Node::ELEMENT_NODE {
-                    recurse_get_text(out_cursor, out_text, sel, n.child_nodes());
+            }
+            if n.node_type() == Node::TEXT_NODE {
+                out_text.push_str(&n.node_value().unwrap());
+            } else if n.node_type() == Node::ELEMENT_NODE {
+                let nodes = n.child_nodes();
+                for i in 0 .. nodes.length() {
+                    recurse_get_text(&nodes.item(i).unwrap(), out_cursor, out_text, sel);
                 }
             }
         }
 
         let mut text = String::new();
         let mut cursor = None;
-        recurse_get_text(&mut cursor, &mut text, &sel, line.child_nodes());
+        recurse_get_text(&line, &mut cursor, &mut text, &sel);
         eprintln!("Line! Text [{}], cursor {:?}", text, cursor);
 
         // Find default root
@@ -634,7 +579,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
                 at_parent = at_parent.parent_element().unwrap();
             }
             root_context_path.reverse();
-            let context_children = context_line.children();
+            let context_children = context_line.child_nodes();
             for (i, (_, _, block_indent)) in root_context_path.iter_mut().enumerate() {
                 let Some(aligned) = context_children.item(i as u32) else {
                     continue;
@@ -724,7 +669,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
                     // Find next element
                     loop {
                         // Try to move forward
-                        if let Some(lift_at_next) = lift_at.next_element_sibling() {
+                        if let Some(lift_at_next) = lift_at.next_sibling() {
                             lift_at = lift_at_next;
                             if lift_at.parent_element().unwrap() == place_parent {
                                 // Reached root, stop
@@ -740,7 +685,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
                         }
 
                         // Can't move forward, try moving up (then resume moving forward)
-                        let lift_at_next = lift_at.parent_element().unwrap();
+                        let lift_at_next = lift_at.parent_node().unwrap();
                         lift_at = lift_at_next;
                     };
 
@@ -858,9 +803,9 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
             changed = true;
 
             // Lift line + any following elements between the line and the placement root
-            line.remove();
+            line.parent_node().unwrap().remove_child(&line).unwrap();
             for e in &lift_following {
-                e.remove();
+                e.parent_node().unwrap().remove_child(&e).unwrap();
             }
 
             // (Clean up empty left over blocks/containers)
@@ -1102,18 +1047,19 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
             let inline = vec![Inline::Text(text)];
             {
                 let offset = Cell::new(0usize);
-                sync_shadow_dom(
-                    &mut cursor,
-                    &offset,
-                    &line,
-                    generate_line_shadowdom(line_type, &mut indents, inline),
-                );
+                line =
+                    sync_shadow_dom(
+                        &mut cursor,
+                        &offset,
+                        &line,
+                        generate_line_shadowdom(line_type, &mut indents, inline),
+                    );
             }
         }
 
         // Update indents
         {
-            let children = line.children();
+            let children = line.dyn_ref::<Element>().unwrap().children();
             for i in 0 .. children.length() {
                 let child = children.item(i).unwrap();
                 let Some(id) = child.get_attribute(ATTR_INDENT_ID) else {
@@ -1154,7 +1100,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Elemen
         if !changed {
             break;
         }
-        let Some(at1) = get_line_forward(&line, MoveMode::Exclusive) else {
+        let Some(at1) = line_scan(&line, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
             break;
         };
         context_line = Some(line);
@@ -1290,7 +1236,7 @@ fn main() {
             recursive_generate_block(&mut ctx, &mut root_children, block);
         }
         root.ref_extend(root_children.into_iter().map(el_from_raw).collect());
-        let indent_blocks = document().get_elements_by_class_name(CLASS_BLOCK_INDENT);
+        let indent_blocks = document().get_elements_by_class_name(CLASS_BLOCK);
         for i in 0 .. indent_blocks.length() {
             let indent_block = indent_blocks.item(i).unwrap();
             let id = usize::from_str_radix(&indent_block.get_attribute(ATTR_ID).unwrap(), 10).unwrap();
@@ -1304,7 +1250,7 @@ fn main() {
     root.ref_own(|self1| {
         let observer = MutationObserver::new(&Closure::<dyn Fn(Array) -> ()>::new({
             struct Change {
-                element: Element,
+                line: Node,
             }
 
             struct DelayState {
@@ -1374,15 +1320,15 @@ fn main() {
                             loop {
                                 if let Some(at_temp) = at.dyn_ref::<Element>() {
                                     let classes = at_temp.class_list();
-                                    if classes.contains(CLASS_LINE) {
-                                        break 'found at_temp.clone();
-                                    }
-                                    if classes.contains(CLASS_BLOCK_INDENT) {
+                                    if classes.contains(CLASS_BLOCK) {
                                         break;
                                     }
                                     if classes.contains(CLASS_ROOT) {
                                         break;
                                     }
+                                }
+                                if is_line(&at) {
+                                    break 'found at;
                                 }
                                 let Some(at_temp) = at.parent_node() else {
                                     break;
@@ -1390,12 +1336,12 @@ fn main() {
                                 at = at_temp;
                             }
                             // Not within a line, so some child of a block? So find the next line to start from
-                            let Some(line) = get_line_forward(&start, MoveMode::Inclusive) else {
+                            let Some(line) = line_scan(&start, ScanDirection::Forward, ScanInclusivity::Inclusive) else {
                                 continue 'next_mutation;
                             };
                             break 'found line;
                         };
-                        delay_mut.changes.push(Change { element: line });
+                        delay_mut.changes.push(Change { line: line });
                     }
 
                     // Throttle change handling, don't cause lag while typing actively
@@ -1410,12 +1356,12 @@ fn main() {
                             let seen = js_sys::Set::new(&JsValue::from(js_sys::Array::new()));
                             let mut ctx = UpdateLinesStartingAtCtx { ids: ids };
                             for change in changes {
-                                let el_js_value = JsValue::from(&change.element);
+                                let el_js_value = JsValue::from(&change.line);
                                 if seen.has(&el_js_value) {
                                     continue;
                                 }
                                 seen.add(&el_js_value);
-                                update_lines_starting_at(&mut ctx, change.element);
+                                update_lines_starting_at(&mut ctx, change.line);
                                 eprintln!("change end");
                             }
                         }
@@ -1432,4 +1378,185 @@ fn main() {
         }).unwrap();
         observer
     });
+
+    // Set up contenteditable navigation issue workaround hack
+    //
+    // In contenteditable, there are cursor positions inbetween elements which makes
+    // navigation unpleasant. Deletes in these positions delete elements without
+    // touching content, then the change handler will recreate them. Up and down move
+    // to the start/end of the block element not to the previous/next line in the
+    // neighboring block elements.
+    //
+    // This intercepts keypresses at the start/end of a text node and translates them
+    // to the expected movements/changes.
+    root.ref_own(
+        |e| EventListener::new_with_options(
+            &e.raw(),
+            "keydown",
+            EventListenerOptions::enable_prevent_default(),
+            |event| {
+                let event = event.dyn_ref::<KeyboardEvent>().unwrap();
+                let Some(sel) = document().get_selection().unwrap() else {
+                    eprintln!("Cursor move, no sel");
+                    return;
+                };
+                let Some(node) = sel.anchor_node() else {
+                    eprintln!("Cursor move, no sel node");
+                    return;
+                };
+                let Ok(node) = node.dyn_into() else {
+                    eprintln!("Cursor move, not text node");
+                    return;
+                };
+                let forward;
+
+                enum KeyDimension {
+                    Vert,
+                    Horiz,
+                }
+
+                let dim;
+                match event.key().as_str() {
+                    "ArrowLeft" => {
+                        dim = KeyDimension::Horiz;
+                        forward = false;
+                    },
+                    "ArrowRight" => {
+                        dim = KeyDimension::Horiz;
+                        forward = true;
+                    },
+                    "ArrowUp" => {
+                        dim = KeyDimension::Vert;
+                        forward = false;
+                    },
+                    "ArrowDown" => {
+                        dim = KeyDimension::Vert;
+                        forward = true;
+                    },
+                    "Backspace" => {
+                        dim = KeyDimension::Horiz;
+                        forward = false;
+                    },
+                    "Delete" => {
+                        dim = KeyDimension::Horiz;
+                        forward = true;
+                    },
+                    _ => {
+                        return;
+                    },
+                }
+
+                fn is_text(n: &Node) -> bool {
+                    return n.node_type() == Node::TEXT_NODE;
+                }
+
+                fn is_line_block_or_root(n: &Node) -> bool {
+                    if let Some(n) = n.dyn_ref::<Element>() {
+                        let classes = n.class_list();
+                        if classes.contains(CLASS_LINE) || classes.contains(CLASS_ROOT) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+
+                match dim {
+                    KeyDimension::Horiz => {
+                        // This doubles up on event handling - this adjusts the starting position, then
+                        // the normal handler does an additional move. This clears the (extra) gap plus
+                        // the intended 1 movement.
+                        if !sel.is_collapsed() {
+                            return;
+                        }
+                        if !forward && sel.anchor_offset() == 0 {
+                            let Some(prev) =
+                                dom::scan(
+                                    &node,
+                                    is_line_block_or_root,
+                                    is_text,
+                                    ScanDirection::Backward,
+                                    ScanInclusivity::Exclusive,
+                                ) else {
+                                    return;
+                                };
+                            dom::select(&prev, prev.text_content().unwrap().len());
+                        } else if forward && sel.anchor_offset() as usize == node.text_content().unwrap().len() {
+                            let Some(next) =
+                                dom::scan(
+                                    &node,
+                                    is_line_block_or_root,
+                                    is_text,
+                                    ScanDirection::Forward,
+                                    ScanInclusivity::Exclusive,
+                                ) else {
+                                    return;
+                                };
+                            dom::select(&next, 0);
+                        } else {
+                            return;
+                        }
+                    },
+                    KeyDimension::Vert => {
+                        // This prevents default handling so this is the only handler; it moves to the
+                        // exact desired location.
+                        let dest_line = if !forward {
+                            let Some(prev) =
+                                line_scan(&node, ScanDirection::Backward, ScanInclusivity::Exclusive) else {
+                                    return;
+                                };
+                            prev
+                        } else {
+                            let Some(next) =
+                                line_scan(&node, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
+                                    return;
+                                };
+                            next
+                        };
+                        let x = sel.get_range_at(0).unwrap().get_bounding_client_rect().left();
+                        let y = {
+                            let r = document().create_range().unwrap();
+                            r.select_node(&dest_line).unwrap();
+                            let dest_box = r.get_bounding_client_rect();
+                            dest_box.top() + dest_box.height() / 2.
+                        };
+                        let Some(caret) = document().caret_position_from_point(x as f32, y as f32) else {
+                            return;
+                        };
+                        let Some(caret_node) = caret.offset_node() else {
+                            return;
+                        };
+
+                        // This seems to be an offset into all text into the node... I think it's a bug,
+                        // but this could work around by walking text nodes until the offset.
+                        if let Some(mut at) = dom::scan(&caret_node, is_root, is_text, ScanDirection::Forward, ScanInclusivity::Inclusive) {
+                            let mut offset = 0;
+                            loop {
+                                let at_text = at.text_content().unwrap();
+                                let len = at_text.len();
+                                if offset + len >= caret.offset() as usize {
+                                    dom::select(&at, caret.offset() as usize - offset);
+                                    event.prevent_default();
+                                    break;
+                                }
+                                offset += len;
+                                let Some(at_temp) =
+                                    dom::scan(
+                                        &at,
+                                        is_root,
+                                        is_text,
+                                        ScanDirection::Forward,
+                                        ScanInclusivity::Exclusive,
+                                    ) else {
+                                        break;
+                                    };
+                                at = at_temp;
+                            }
+                        } else {
+                            dom::select(&caret_node, 0);
+                        }
+                    },
+                }
+            },
+        ),
+    );
 }

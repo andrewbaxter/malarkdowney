@@ -259,6 +259,7 @@ version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bfcc48ab4c2db58b3e9d6c9af9eef336c2318dfdf7f75b710c46b2a1855d1a1e"
 dependencies = [
+ "gloo-events",
  "gloo-file",
  "gloo-timers",
  "gloo-utils",
