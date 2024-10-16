@@ -1,3 +1,8 @@
+@font-face {
+  font-family: "nunito";
+  src: url("Nunito-VariableFont_wght.ttf");
+}
+
 :root {
   --s-section-pad: 0.8cm;
   --s-line-pad: 0.5cm;
@@ -12,22 +17,28 @@
 html {
   height: 100%;
   font-size: 16pt;
-  font-family: sans-serif;
+  font-family: "nunito", sans-serif;
 }
 
 body {
-  display: grid;
-  grid-template-columns: 1fr;
-  justify-items: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   align-items: center;
-  height: 100%;
+  min-height: 100%;
+  padding: 1cm 0.5cm;
+  max-width: 18cm;
+  margin: 0 auto;
 }
 
-.malarkdowney_root {
-  padding: 0.5cm;
-  max-width: 18cm;
-  border-radius: 0.1cm;
-  border: 0.07cm dashed rgb(57 179 77 / 30%);
+hr {
+  border-top: 0.07cm dashed rgb(57 179 77 / 30%);
+  margin: var(--s-section-pad) 0;
+  width: 100%;
+}
+
+.footnote {
+  font-size: 0.8em;
 }
 
 .malarkdowney_root,
@@ -45,12 +56,18 @@ body {
 }
 
 .malarkdowney_aligned {
-  line-height: 1cm;
+  font-family: monospace;
+  font-weight: bold;
+  opacity: 0.5;
 }
 
-.malarkdowney_incomplete {
-  padding-bottom: 0.2cm;
-  border-bottom: 0.06cm dotted #eb4775;
+.malarkdowney_incomplete::before {
+  --s-width: 0.5cm;
+  content: " ";
+  display: inline-block;
+  margin-right: calc(-1 * var(--s-width));
+  width: var(--s-width);
+  border-bottom: 0.1cm dotted #eb4775;
 }
 
 .malarkdowney_block_ul,
@@ -67,9 +84,9 @@ body {
 
 code.malarkdowney {
   font-family: monospace;
+  font-size: 0.8em;
   padding: 0.1cm;
-  border: 0.02cm solid rgba(0, 0, 0, 0.3);
-  background-color: rgba(0, 0, 0, 0.05);
+  background-color: rgb(224, 231, 251);
   border-radius: 0.1cm;
 }
 
@@ -79,5 +96,7 @@ h3.malarkdowney,
 h4.malarkdowney,
 h5.malarkdowney,
 h6.malarkdowney {
+  font-family: sans-serif;
+  text-transform: uppercase;
   margin: var(--s-section-pad) 0;
 }

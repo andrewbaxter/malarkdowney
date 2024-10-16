@@ -1,0 +1,24 @@
+on:
+  push:
+    branches: [$default-branch]
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo install wasm-bindgen-cli
+      - run: cargo run --bin admin -- build
+      - id: pages
+        uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./stage/web/static
+      - id: deployment
+        uses: actions/deploy-pages@v4

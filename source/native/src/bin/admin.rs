@@ -1,4 +1,8 @@
 use {
+    aargvark::{
+        vark,
+        Aargvark,
+    },
     flowcontrol::ta_return,
     futures::FutureExt,
     http::Response,
@@ -20,7 +24,11 @@ use {
     serde::Deserialize,
     std::{
         env,
-        io::Cursor,
+        io::{
+            stdout,
+            Cursor,
+            Write,
+        },
         path::{
             Path,
             PathBuf,
@@ -221,70 +229,88 @@ macro_rules! cap_fn{
     };
 }
 
+#[derive(Aargvark)]
+enum ArgCommand {
+    Build,
+    DevServer,
+}
+
 #[tokio::main]
 async fn main() {
     match async {
         let log = Log::new_root(loga::INFO);
         let root_dir = PathBuf::from(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("../../").canonicalize()?;
-        let stage_dir = root_dir.join("stage");
-        let static_dir = build_web_static(&log, &root_dir, &stage_dir).await?;
-        let tm = TaskManager::new();
-        let bind_addr = "127.0.0.1:8080";
-        tm.critical_stream(
-            "Static server",
-            TcpListenerStream::new(
-                TcpListener::bind(bind_addr).await.stack_context(&log, "Error binding to address")?,
-            ),
-            {
-                let log = log.fork(ea!(sys = "stand-game-api"));
-
-                struct Handler {
-                    log: Log,
-                    static_dir: PathBuf,
-                }
-
-                #[async_trait]
-                impl htserve::Handler<Body> for Handler {
-                    async fn handle(&self, args: htserve::HandlerArgs<'_>) -> Response<Body> {
-                        let log = self.log.fork(ea!(url = args.head.uri, endpoint = "stand"));
-                        match async {
-                            ta_return!(Response < Body >, loga::Error);
-                            let subpath = args.subpath.strip_prefix("/").unwrap_or(&args.subpath);
-                            let path = std::path::absolute(self.static_dir.join(subpath)).unwrap();
-                            if !path.starts_with(&self.static_dir) {
-                                return Ok(response_404());
-                            }
-                            let mime = mime_guess::from_path(&path).first_or_octet_stream();
-                            return Ok(htserve::response_file(&args.head.headers, &mime.to_string(), &path).await?);
-                        }.await {
-                            Ok(r) => r,
-                            Err(e) => {
-                                log.log_err(loga::WARN, e.context("Error serving response"));
-                                return response_503();
-                            },
-                        }
-                    }
-                }
-
-                let state = Arc::new(Handler {
-                    log: log.clone(),
-                    static_dir: static_dir,
-                });
-                cap_fn!((stream)(log, state) {
-                    let stream = match stream {
-                        Ok(s) => s,
-                        Err(e) => {
-                            log.log_err(loga::DEBUG, e.context("Error opening peer stream"));
-                            return Ok(());
-                        },
-                    };
-                    htserve::root_handle_http(&log, state, stream).await?;
-                    return Ok(());
-                })
+        let command = vark::<ArgCommand>();
+        match command {
+            ArgCommand::Build => {
+                let stage_dir = root_dir.join("stage");
+                let static_dir = build_web_static(&log, &root_dir, &stage_dir).await?;
+                stdout().write_all(static_dir.as_os_str().as_encoded_bytes()).unwrap();
             },
-        );
-        log.log_with(loga::INFO, "Server listening", ea!(addr = bind_addr));
-        tm.join(&log).await?;
+            ArgCommand::DevServer => {
+                let stage_dir = root_dir.join("stage");
+                let static_dir = build_web_static(&log, &root_dir, &stage_dir).await?;
+                let tm = TaskManager::new();
+                let bind_addr = "127.0.0.1:8080";
+                tm.critical_stream(
+                    "Static server",
+                    TcpListenerStream::new(
+                        TcpListener::bind(bind_addr).await.stack_context(&log, "Error binding to address")?,
+                    ),
+                    {
+                        let log = log.fork(ea!(sys = "stand-game-api"));
+
+                        struct Handler {
+                            log: Log,
+                            static_dir: PathBuf,
+                        }
+
+                        #[async_trait]
+                        impl htserve::Handler<Body> for Handler {
+                            async fn handle(&self, args: htserve::HandlerArgs<'_>) -> Response<Body> {
+                                let log = self.log.fork(ea!(url = args.head.uri, endpoint = "stand"));
+                                match async {
+                                    ta_return!(Response < Body >, loga::Error);
+                                    let subpath = args.subpath.strip_prefix("/").unwrap_or(&args.subpath);
+                                    let path = std::path::absolute(self.static_dir.join(subpath)).unwrap();
+                                    if !path.starts_with(&self.static_dir) {
+                                        return Ok(response_404());
+                                    }
+                                    let mime = mime_guess::from_path(&path).first_or_octet_stream();
+                                    return Ok(
+                                        htserve::response_file(&args.head.headers, &mime.to_string(), &path).await?,
+                                    );
+                                }.await {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        log.log_err(loga::WARN, e.context("Error serving response"));
+                                        return response_503();
+                                    },
+                                }
+                            }
+                        }
+
+                        let state = Arc::new(Handler {
+                            log: log.clone(),
+                            static_dir: static_dir,
+                        });
+                        cap_fn!((stream)(log, state) {
+                            let stream = match stream {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    log.log_err(loga::DEBUG, e.context("Error opening peer stream"));
+                                    return Ok(());
+                                },
+                            };
+                            htserve::root_handle_http(&log, state, stream).await?;
+                            return Ok(());
+                        })
+                    },
+                );
+                log.log_with(loga::INFO, "Server listening", ea!(addr = bind_addr));
+                tm.join(&log).await?;
+            },
+        }
         return Ok(()) as Result<_, loga::Error>;
     }.await {
         Ok(_) => { },

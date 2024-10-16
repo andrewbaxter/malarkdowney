@@ -1,12 +1,12 @@
 use {
-    crate::dom,
+    crate::{
+        malarkdowney::dom,
+    },
     flowcontrol::{
         shed,
         superif,
     },
-    gloo::utils::{
-        document,
-    },
+    gloo::utils::document,
     std::{
         cell::Cell,
         collections::{
@@ -16,24 +16,13 @@ use {
     },
     wasm_bindgen::{
         JsCast,
-        JsValue,
     },
     web_sys::{
-        console,
         Element,
         Node,
         Text,
     },
 };
-
-macro_rules! eprintln{
-    ($pat: literal) => {
-        web_sys:: console:: log_1(& wasm_bindgen:: JsValue:: from_str($pat))
-    };
-    ($pat: literal, $($data: expr), *) => {
-        web_sys::console::log_1(&wasm_bindgen::JsValue::from_str(&format!($pat, $($data,) *)))
-    };
-}
 
 pub enum ShadowDom {
     Text(String),
@@ -81,22 +70,11 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
             let have = match have.dyn_ref::<Text>() {
                 Some(have) => {
                     if have.text_content().unwrap() != want {
-                        console::log_2(
-                            &JsValue::from(
-                                &format!(
-                                    "sync dom - changing text node text from [{}] to [{}]",
-                                    have.text_content().unwrap(),
-                                    want
-                                ),
-                            ),
-                            &JsValue::from(have),
-                        );
                         have.set_text_content(Some(&want));
                     }
                     have.clone()
                 },
                 None => {
-                    eprintln!("sync dom - not text; replacing text (was not text) [{}]", want);
                     let new = document().create_text_node(&want);
                     replace(have, new.dyn_ref().unwrap());
                     new
@@ -107,12 +85,6 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                     break;
                 };
                 let rel_offset = cursor - offset.get();
-                console::log_2(
-                    &JsValue::from(
-                        &format!("sync dom - set sel at rel offset {} ({} - {})", rel_offset, cursor, offset.get()),
-                    ),
-                    &JsValue::from(&have),
-                );
                 dom::select(&have, rel_offset);
             };
             offset.set(offset.get() + want.len());
@@ -128,7 +100,6 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                 }
                 break have.clone();
             } 'mismatch {
-                eprintln!("sync dom - not el or wrong tag; replacing el, wanted tag {}", want.tag);
                 let have1 = document().create_element(want.tag).unwrap();
                 replace(have, &have1);
                 break have1;
@@ -147,19 +118,11 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                     }
                 }
                 for k in remove_attrs {
-                    console::log_2(
-                        &JsValue::from(&format!("sync dom - removing attr [{}]", k)),
-                        &JsValue::from(&have),
-                    );
                     have.remove_attribute(&k).unwrap();
                 }
             }
             for (k, v) in want.attrs {
                 if have.get_attribute(&k).as_ref() != Some(&v) {
-                    console::log_2(
-                        &JsValue::from(&format!("sync dom - setting attr [{}] [{}]", k, v)),
-                        &JsValue::from(&have),
-                    );
                     have.set_attribute(&k, &v).unwrap();
                 }
             }
@@ -171,7 +134,6 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                 for k in classes.values() {
                     let k = k.unwrap();
                     let Some(k) = k.as_string() else {
-                        console::log_2(&JsValue::from("error current class as str"), &k);
                         continue;
                     };
                     if !want.classes.contains(&k) {
@@ -179,19 +141,11 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                     }
                 }
                 for k in remove_classes {
-                    console::log_2(
-                        &JsValue::from(&format!("sync dom - removing class [{}]", k)),
-                        &JsValue::from(&have),
-                    );
                     classes.remove_1(&k).unwrap();
                 }
             }
             for k in want.classes {
                 if !classes.contains(&k) {
-                    console::log_2(
-                        &JsValue::from(&format!("sync dom - setting class [{}]", k)),
-                        &JsValue::from(&have),
-                    );
                     classes.add_1(&k).unwrap();
                 }
             }
@@ -199,30 +153,18 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
             // Sync children
             let have_children = have.child_nodes();
             let have_children_len = have_children.length() as usize;
-
-            //. console::log_2(
-            //.     &JsValue::from(&format!("sync dom - have children {}", have_children_len)),
-            //. &JsValue::from(&have),
-            //. );
             let mut want_children_iter = want.children.into_iter();
             let mut i = 0;
             while i < have_children_len {
                 let Some(want_child) = want_children_iter.next() else {
                     break;
                 };
-
-                //. eprintln!("sync dom - sync el {}", i);
                 let have_child = have_children.item(i as u32).unwrap();
                 sync_shadow_dom(cursor, offset, &have_child, want_child);
                 i += 1;
             }
             for _ in i .. have_children_len {
                 let child = have.last_child().unwrap();
-                console::log_3(
-                    &JsValue::from("sync dom - removing extra child"),
-                    &JsValue::from(&child),
-                    &JsValue::from(&have),
-                );
                 have.remove_child(&child).unwrap();
             }
             for want_child in want_children_iter {
@@ -235,11 +177,6 @@ pub fn sync_shadow_dom(cursor: &mut Option<usize>, offset: &Cell<usize>, have: &
                     },
                 };
                 have.append_child(&child).unwrap();
-                console::log_3(
-                    &JsValue::from("sync dom - adding missing child"),
-                    &JsValue::from(&child),
-                    &JsValue::from(&have),
-                );
                 sync_shadow_dom(cursor, offset, &child, want_child);
             }
             return have.dyn_into().unwrap();

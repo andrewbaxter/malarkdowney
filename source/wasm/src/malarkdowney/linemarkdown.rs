@@ -163,6 +163,8 @@ pub const EMPHASIS_DELIM: char = '_';
 pub const CODE_DELIM: char = '`';
 pub const LINK_BEGIN_DELIM: char = '[';
 pub const LINK_END_DELIM: char = ']';
+pub const LINK_ADDR_BEGIN_DELIM: char = '(';
+pub const LINK_ADDR_END_DELIM: char = ')';
 
 fn parse_strong(c: &mut Cursor) -> Inline {
     let mut complete = false;
@@ -249,7 +251,7 @@ fn parse_code(c: &mut Cursor) -> Inline {
                             break 'not_end;
                         }
                     }
-                    for _ in 0 .. extra_delim_reps + 1 {
+                    for _ in 0 .. (extra_delim_reps + 1) {
                         text.push(CODE_DELIM);
                     }
                     c.commit(c1);
@@ -329,5 +331,65 @@ fn parse_link(c: &mut Cursor) -> Inline {
         title_begin_delim: LINK_BEGIN_DELIM.to_string(),
         title: title,
         continuation: continuation,
+    });
+}
+
+pub fn text(text: impl AsRef<str>) -> Inline {
+    return Inline::Text(text.as_ref().to_string());
+}
+
+pub fn strong(children: Vec<Inline>) -> Inline {
+    return Inline::Strong(InlineStrong {
+        begin_delim: STRONG_DELIM.to_string(),
+        children: children,
+        end_delim: Some(STRONG_DELIM.to_string()),
+    });
+}
+
+pub fn emphasis(children: Vec<Inline>) -> Inline {
+    return Inline::Emphasis(InlineEmphasis {
+        begin_delim: EMPHASIS_DELIM.to_string(),
+        children: children,
+        end_delim: Some(EMPHASIS_DELIM.to_string()),
+    });
+}
+
+pub fn code(text: impl AsRef<str>) -> Inline {
+    let text = text.as_ref();
+    let mut longest_run = 0;
+    let mut run = 0;
+    for c in text.chars() {
+        if c == CODE_DELIM {
+            run += 1;
+        } else {
+            if run > longest_run {
+                longest_run = run;
+                run = 0;
+            }
+        }
+    }
+    if run > longest_run {
+        longest_run = run;
+    }
+    let delim = CODE_DELIM.to_string().repeat(longest_run + 1);
+    return Inline::Code(InlineCode {
+        incomplete: false,
+        text: format!("{}{}{}", delim, text, delim),
+    })
+}
+
+pub fn link(title: Vec<Inline>, address: impl AsRef<str>) -> Inline {
+    return Inline::Link(InlineLink {
+        incomplete: false,
+        title_begin_delim: LINK_BEGIN_DELIM.to_string(),
+        title: title,
+        continuation: Some(InlineLinkContinuation {
+            title_end_delim: LINK_END_DELIM.to_string(),
+            address: Some(InlineLinkAddress {
+                begin_delim: LINK_ADDR_BEGIN_DELIM.to_string(),
+                address: address.as_ref().to_string(),
+                end_delim: LINK_ADDR_END_DELIM.to_string(),
+            }),
+        }),
     });
 }
