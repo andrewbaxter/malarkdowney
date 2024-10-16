@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: cargo install wasm-bindgen-cli
-      - run: cargo run --bin admin -- build
+      - run: cd source && ./build.sh
       - id: pages
         uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
