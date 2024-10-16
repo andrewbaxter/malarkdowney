@@ -671,7 +671,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                             break;
                         }
                     },
-                    BlockType::BlockCode => unreachable!(),
+                    BlockType::BlockCode => { },
                 }
                 place_parent = parent;
                 place_before = parent_next;

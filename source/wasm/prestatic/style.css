@@ -41,6 +41,11 @@ hr {
   font-size: 0.8em;
 }
 
+.malarkdowney_root {
+  padding: 0.3cm;
+  margin: -0.3cm;
+}
+
 .malarkdowney_root,
 .malarkdowney_block {
   & > *:first-child {
