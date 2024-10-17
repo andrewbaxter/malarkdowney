@@ -84,7 +84,7 @@ code.malarkdowney,
 .malarkdowney_block_code {
   font-family: monospace;
   font-size: 0.8em;
-  background-color: #f9f0ec;
+  background-color: var(--c-orange);
 }
 
 .malarkdowney_block_ul,
@@ -164,7 +164,7 @@ codeline.malarkdowney {
 .malarkdowney_aligned {
   font-family: monospace;
   font-weight: bold;
-  color: var(--c-orange);
+  opacity: 0.5;
 }
 
 /* Inline things */
