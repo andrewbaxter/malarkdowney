@@ -436,7 +436,7 @@ fn line_scan(start: &Node, direction: ScanDirection, inclusivity: ScanInclusivit
     return dom::scan(start, is_root, is_match, direction, inclusivity);
 }
 
-#[structre("^(?<number>\\d+\\. )(?<suffix>.*)$")]
+#[structre("^(?<number>[0-9]+\\. )(?<suffix>.*)$")]
 struct ReOlNumberPrefix {
     number: String,
     suffix: String,
