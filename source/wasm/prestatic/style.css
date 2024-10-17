@@ -3,9 +3,16 @@
   src: url("Nunito-VariableFont_wght.ttf");
 }
 
+@font-face {
+  font-family: "bebasneue";
+  src: url("BebasNeue-Regular.ttf");
+}
+
 :root {
   --s-section-pad: 0.8cm;
   --s-line-pad: 0.5cm;
+  --c-purple: rgb(105, 0, 167);
+  --c-orange: rgb(255, 137, 80);
 }
 
 * {
@@ -32,7 +39,7 @@ body {
 }
 
 hr {
-  border-top: 0.07cm dashed rgb(57 179 77 / 30%);
+  border-top: 0.08cm dashed var(--c-purple);
   margin: var(--s-section-pad) 0;
   width: 100%;
 }
@@ -40,6 +47,9 @@ hr {
 .footnote {
   font-size: 0.8em;
 }
+
+/* Malarkdowney */
+/* ************ */
 
 .malarkdowney_root {
   padding: 0.3cm;
@@ -56,23 +66,21 @@ hr {
   }
 }
 
-.malarkdowney_line {
-  margin: var(--s-line-pad) 0;
-}
+/* Block things */
+/* ************ */
 
-.malarkdowney_aligned {
+.malarkdowney_block_code {
   font-family: monospace;
-  font-weight: bold;
-  opacity: 0.5;
+  white-space: pre;
+  padding: var(--s-line-pad) 0.3cm;
+  font-size: 0.8em;
 }
 
-.malarkdowney_incomplete::before {
-  --s-width: 0.5cm;
-  content: " ";
-  display: inline-block;
-  margin-right: calc(-1 * var(--s-width));
-  width: var(--s-width);
-  border-bottom: 0.1cm dotted #eb4775;
+code.malarkdowney,
+.malarkdowney_block_code {
+  font-family: monospace;
+  font-size: 0.8em;
+  background-color: var(--c-orange);
 }
 
 .malarkdowney_block_ul,
@@ -83,16 +91,39 @@ hr {
   }
 }
 
-.malarkdowney.malarkdowney_inline_pseudo_a {
-  color: #435590;
+/* Line things */
+/* *********** */
+
+h1.malarkdowney {
+  font-size: 45pt;
+  &::before {
+    background-color: var(--c-purple);
+    opacity: 0.8;
+  }
 }
 
-code.malarkdowney {
-  font-family: monospace;
-  font-size: 0.8em;
-  padding: 0.1cm;
-  background-color: rgb(224, 231, 251);
-  border-radius: 0.1cm;
+h2.malarkdowney {
+  font-size: 35pt;
+  &::before {
+    background-color: var(--c-purple);
+    opacity: 0.3;
+  }
+}
+
+h3.malarkdowney {
+  font-size: 30pt;
+}
+
+h4.malarkdowney {
+  font-size: 28pt;
+}
+
+h5.malarkdowney {
+  font-size: 24pt;
+}
+
+h6.malarkdowney {
+  font-size: 20pt;
 }
 
 h1.malarkdowney,
@@ -101,7 +132,54 @@ h3.malarkdowney,
 h4.malarkdowney,
 h5.malarkdowney,
 h6.malarkdowney {
-  font-family: sans-serif;
+  position: relative;
+  font-family: "bebasneue", sans-serif;
   text-transform: uppercase;
   margin: var(--s-section-pad) 0;
+
+  &::before {
+    z-index: -1;
+    display: inline-block;
+    content: "";
+    position: absolute;
+    top: 0.3lh;
+    height: 0.4lh;
+    left: 0;
+    right: 0;
+  }
+}
+
+p.malarkdowney {
+  margin: var(--s-line-pad) 0;
+}
+
+codeline.malarkdowney {
+  margin: 0.1cm 0;
+}
+
+.malarkdowney_aligned {
+  font-family: monospace;
+  font-weight: bold;
+  opacity: 0.5;
+}
+
+/* Inline things */
+/* ************* */
+
+.malarkdowney_incomplete::before {
+  --s-width: 0.5cm;
+  content: "";
+  display: inline-block;
+  margin-right: calc(-1 * var(--s-width));
+  width: var(--s-width);
+  border-bottom: 0.1cm dotted #eb4775;
+}
+
+.malarkdowney.malarkdowney_inline_pseudo_a {
+  color: #435590;
+}
+
+code.malarkdowney {
+  padding: 0.1cm;
+  border-radius: 0.1cm;
 }

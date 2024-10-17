@@ -3,8 +3,17 @@ use {
         document,
         window,
     },
-    web_sys::Node,
+    web_sys::{
+        DomRect,
+        Node,
+    },
 };
+
+pub fn bounds(n: &Node) -> DomRect {
+    let r = document().create_range().unwrap();
+    r.select_node(n).unwrap();
+    return r.get_bounding_client_rect();
+}
 
 pub fn select(n: &Node, rel_offset: usize) {
     let sel = window().get_selection().unwrap().unwrap();
@@ -15,13 +24,13 @@ pub fn select(n: &Node, rel_offset: usize) {
     sel.add_range(&range).unwrap();
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum ScanInclusivity {
     Inclusive,
     Exclusive,
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 pub enum ScanDirection {
     Forward,
     Backward,
@@ -34,7 +43,7 @@ pub fn scan(
     direction: ScanDirection,
     inclusivity: ScanInclusivity,
 ) -> Option<Node> {
-    let mut skip_first_next = inclusivity == ScanInclusivity::Inclusive;
+    let mut skip_advance_once = inclusivity == ScanInclusivity::Inclusive;
     let fn_advance: fn(&Node) -> Option<Node>;
     let fn_descend: fn(&Node) -> Option<Node>;
     match direction {
@@ -51,8 +60,8 @@ pub fn scan(
     loop {
         loop {
             // Advance
-            if skip_first_next {
-                skip_first_next = false;
+            if skip_advance_once {
+                skip_advance_once = false;
             } else {
                 let Some(at_temp) = fn_advance(&at) else {
                     // (move up)
@@ -70,14 +79,14 @@ pub fn scan(
 
                 // Or move down
                 let Some(at_temp) = fn_descend(&at) else {
-                    // (no children, try moving backwards again)
+                    // (no children, try advancing again)
                     break;
                 };
                 at = at_temp;
             }
         }
 
-        // Find up
+        // Move up
         {
             let Some(at_temp) = at.parent_node() else {
                 return None;

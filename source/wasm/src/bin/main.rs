@@ -43,7 +43,7 @@ fn main() {
                         )]),
                         Block::Line(vec![text(
                             //. .
-                            "For example, if your cursor is between a normal letter and a bold letter and you press \"x\", should \"x\" be bold or not?  There's no way to convey what you want to the editor, and this is both frustrating and, depending on the editor, can lead to a lot of junk markup.",
+                            "For example, if your cursor is between a normal letter and a bold letter and you press \"x\", should \"x\" be bold or not?  There's no way to convey what you want to the editor, and this is both frustrating and, depending on the editor, can lead to a lot of leftover junk markup.",
                         )])
                     ]
                 ]),
@@ -67,6 +67,6 @@ fn main() {
         //. .
         el("span").text("From "),
         el("a").attr("href", "https://github.com/andrewbaxter/malarkdowney").text("andrewbaxter/malarkdowney"),
-        el("span").text(", with love and bountiful single sentence paragraphs")
+        el("span").text(", with love and bountiful markdowns")
     ])]);
 }

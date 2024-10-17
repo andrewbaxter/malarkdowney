@@ -57,6 +57,7 @@ use {
     },
     web_sys::{
         CharacterData,
+        CssStyleDeclaration,
         Element,
         HtmlElement,
         KeyboardEvent,
@@ -75,6 +76,7 @@ const NAMESPACE: &str = "malarkdowney";
 const ATTR_ID: &str = formatcp!("{}_id", NAMESPACE);
 const ATTR_INDENT_ID: &str = formatcp!("{}_indent_id", NAMESPACE);
 const ATTR_BLOCK_TYPE: &str = formatcp!("{}_block_type", NAMESPACE);
+const ATTR_BLOCKCODE_END: &str = formatcp!("{}_codeblock_end", NAMESPACE);
 const CLASS_NAMESPACE: &str = NAMESPACE;
 const CLASS_ROOT: &str = formatcp!("{}_root", NAMESPACE);
 const CLASS_INCOMPLETE: &str = formatcp!("{}_incomplete", NAMESPACE);
@@ -102,7 +104,6 @@ enum BlockType {
 enum LineType {
     Normal,
     Heading(usize),
-    Code,
 }
 
 fn class_aligned(id: usize) -> String {
@@ -130,10 +131,9 @@ struct LineIndent {
     text: String,
 }
 
-fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inlines: Vec<Inline>) -> ShadowDom {
-    let mut want_children = vec![];
+fn generate_aligned(out_want_children: &mut Vec<ShadowDom>, indents: &mut [LineIndent]) {
     for indent in indents {
-        want_children.push(ShadowDom::Element(ShadowDomElement {
+        out_want_children.push(ShadowDom::Element(ShadowDomElement {
             tag: "span",
             classes: [CLASS_NAMESPACE.to_string(), CLASS_ALIGNED.to_string(), class_aligned(indent.source_indent)]
                 .into_iter()
@@ -148,6 +148,29 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
             })],
         }));
     }
+}
+
+fn generate_line_code_shadowdom(indents: &mut [LineIndent], text: String, last_line: bool) -> ShadowDom {
+    let mut want_children = vec![];
+    generate_aligned(&mut want_children, indents);
+    want_children.push(ShadowDom::Text(text));
+    return ShadowDom::Element(ShadowDomElement {
+        tag: "codeline",
+        classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
+        attrs: {
+            let mut out = HashMap::new();
+            if last_line {
+                out.insert(ATTR_BLOCKCODE_END.to_string(), "1".to_string());
+            }
+            out
+        },
+        children: want_children,
+    });
+}
+
+fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inlines: Vec<Inline>) -> ShadowDom {
+    let mut want_children = vec![];
+    generate_aligned(&mut want_children, indents);
 
     fn generate_inline(want: Inline) -> ShadowDom {
         match want {
@@ -284,7 +307,6 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                 6 => "h6",
                 _ => unreachable!(),
             },
-            LineType::Code => "code",
         },
         classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
         attrs: Default::default(),
@@ -299,6 +321,36 @@ fn get_aligned(id: usize) -> Vec<Element> {
         out.push(aligned.item(i).unwrap().dyn_into::<Element>().unwrap());
     }
     return out;
+}
+
+struct CalculateIndentAlignmentRes {
+    have: f64,
+    want: f64,
+}
+
+fn calculate_indent_alignment(
+    indent_block: &Element,
+    e: &Element,
+    e_style: &CssStyleDeclaration,
+) -> CalculateIndentAlignmentRes {
+    let have_rel_left = superif!({
+        let value = e_style.get_property_value("left").unwrap();
+        let Some(value) = value.strip_suffix("px") else {
+            break 'bad;
+        };
+        let Ok(value) = f64::from_str(&value) else {
+            break 'bad;
+        };
+        value
+    } 'bad {
+        0.
+    });
+    let have_block_left = indent_block.get_bounding_client_rect().left();
+    let have_e_left = e.get_bounding_client_rect().left();
+    return CalculateIndentAlignmentRes {
+        have: have_rel_left,
+        want: have_block_left - have_e_left + have_rel_left,
+    };
 }
 
 fn set_indent(root: &Element, indent_block: Element, aligned: &Vec<Element>, width: f32, recurse: bool) {
@@ -318,9 +370,10 @@ fn set_indent(root: &Element, indent_block: Element, aligned: &Vec<Element>, wid
             },
         };
         for e in aligned.as_ref() {
-            let left = indent_block.get_bounding_client_rect().left() - e.get_bounding_client_rect().left();
+            let e_style = e.dyn_ref::<HtmlElement>().unwrap().style();
+            let left = calculate_indent_alignment(indent_block, e, &e_style).want;
             let want_prop = format!("{}px", left);
-            e.dyn_ref::<HtmlElement>().unwrap().style().set_property("left", &want_prop).unwrap();
+            e_style.set_property("left", &want_prop).unwrap();
         }
         let children = indent_block.children();
         for i in 0 .. children.length() {
@@ -356,10 +409,10 @@ fn is_line(node: &Node) -> bool {
         return false;
     };
     let parent_classes = parent.class_list();
-    if parent_classes.contains(CLASS_BLOCK) || parent_classes.contains(CLASS_ROOT) {
-        return true;
+    if !(parent_classes.contains(CLASS_BLOCK) || parent_classes.contains(CLASS_ROOT)) {
+        return false;
     }
-    return false;
+    return true;
 }
 
 fn is_root(at: &Node) -> bool {
@@ -368,21 +421,16 @@ fn is_root(at: &Node) -> bool {
 
 fn line_scan(start: &Node, direction: ScanDirection, inclusivity: ScanInclusivity) -> Option<Node> {
     fn is_match(at: &Node) -> bool {
-        let Some(parent) = at.parent_element() else {
-            return false;
-        };
-        if !parent.class_list().contains(CLASS_BLOCK) {
+        if !is_line(at) {
             return false;
         }
         if let Some(at_el) = at.dyn_ref::<Element>() {
             let class_list = at_el.class_list();
-            if !class_list.contains(CLASS_BLOCK) {
-                return true;
+            if class_list.contains(CLASS_BLOCK) {
+                return false;
             }
-            return false;
-        } else {
-            return true;
         }
+        return true;
     }
 
     return dom::scan(start, is_root, is_match, direction, inclusivity);
@@ -504,7 +552,6 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         let mut cursor = None;
         recurse_get_text(&line, &mut cursor, &mut text, &sel);
 
-        //. cprintln!("Line! Text [{}], cursor {:?}", text, cursor);
         // Find default root
         let mut place_before = line.next_sibling();
         let mut place_parent = line.parent_element().unwrap();
@@ -514,6 +561,8 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         }
 
         // If there's a context line
+        let mut blockcode_have_parent = false;
+        let mut blockcode_is_nonfirst = false;
         if let Some(context_line) = context_line {
             // Determine context by walking previous line(/context)'s block parents up to root
             let mut root_context_path = vec![];
@@ -574,7 +623,23 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                             break;
                         }
                     },
-                    BlockType::BlockCode => unreachable!(),
+                    BlockType::BlockCode => {
+                        let mut context_codeblock_end = false;
+                        shed!{
+                            let Some(context_line) = context_line.dyn_ref::<Element>() else {
+                                break;
+                            };
+                            if context_line.has_attribute(ATTR_BLOCKCODE_END) {
+                                context_codeblock_end = true;
+                            }
+                        };
+                        if !context_codeblock_end {
+                            blockcode_have_parent = true;
+                            blockcode_is_nonfirst = true;
+                        } else {
+                            break;
+                        }
+                    },
                 }
                 place_parent = parent;
                 place_before = parent_next;
@@ -614,32 +679,26 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             // along to placement root (and the split parents will be recreated later)
             shed!{
                 let mut lift_at = line.clone();
-                'lift_end : loop {
-                    // Find next element
+                if lift_at.parent_element().unwrap() == place_parent {
+                    break;
+                }
+                loop {
+                    // Move forward
                     loop {
-                        // Try to move forward
-                        if let Some(lift_at_next) = lift_at.next_sibling() {
-                            lift_at = lift_at_next;
-                            if lift_at.parent_element().unwrap() == place_parent {
-                                // Reached root, stop
-                                place_before = Some(lift_at.dyn_into().unwrap());
-                                break 'lift_end;
-                            }
+                        let Some(lift_at_next) = lift_at.next_sibling() else {
                             break;
-                        }
-                        if lift_at.parent_element().unwrap() == place_parent {
-                            // Reached root (no next element), stop
-                            place_before = None;
-                            break 'lift_end;
-                        }
-
-                        // Can't move forward, try moving up (then resume moving forward)
-                        let lift_at_next = lift_at.parent_node().unwrap();
+                        };
                         lift_at = lift_at_next;
+                        lift_following.push(lift_at.clone());
                     };
 
-                    // Remember
-                    lift_following.push(lift_at.clone());
+                    // Can't move forward, try moving up (then resume moving forward)
+                    lift_at = lift_at.parent_node().unwrap();
+                    if lift_at.parent_element().unwrap() == place_parent {
+                        // Reached root, stop
+                        place_before = lift_at.next_sibling();
+                        break;
+                    }
                 }
             }
 
@@ -671,7 +730,14 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                             break;
                         }
                     },
-                    BlockType::BlockCode => { },
+                    BlockType::BlockCode => {
+                        if text.starts_with(PREFIX_BLOCKCODE) {
+                            // This must be the first line, otherwise it would be part of the context block
+                            blockcode_have_parent = true;
+                        } else {
+                            break;
+                        }
+                    },
                 }
                 place_parent = parent;
                 place_before = parent_next;
@@ -681,6 +747,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
 
         // Check if starting new prefixed blocks
         let mut create_parents = vec![];
+        let mut blockcode_is_end = false;
         loop {
             if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
                 text = suffix1.to_string();
@@ -713,17 +780,21 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                     text: " ".repeat(parsed.number.len()),
                     first_text: Some(parsed.number),
                 }));
-            } else if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKCODE) {
-                text = suffix1.to_string();
-                let type_ = BlockType::BlockCode;
-                let (parent_id, parent) =
-                    generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKCODE);
-                create_parents.push((parent, LineIndent {
-                    source_indent: parent_id,
-                    type_: type_,
-                    first_text: None,
-                    text: "".to_string(),
-                }));
+            } else if text.starts_with(PREFIX_BLOCKCODE) {
+                if blockcode_is_nonfirst {
+                    blockcode_is_end = true;
+                }
+                if !blockcode_have_parent {
+                    let type_ = BlockType::BlockCode;
+                    let (parent_id, parent) =
+                        generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKCODE);
+                    create_parents.push((parent, LineIndent {
+                        source_indent: parent_id,
+                        type_: type_,
+                        first_text: None,
+                        text: "".to_string(),
+                    }));
+                }
                 break;
             } else {
                 break;
@@ -759,20 +830,16 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             }
 
             // Create blocks and place this line
-            if create_parents.is_empty() {
-                place_parent.insert_before(&line, place_before.as_ref()).unwrap();
-            } else {
+            {
                 let mut place_parent = place_parent.clone();
-                for (depth, (new_parent, indent)) in create_parents.into_iter().enumerate() {
-                    place_parent.insert_before(&new_parent, if depth == 0 {
-                        place_before.as_ref()
-                    } else {
-                        None
-                    }).unwrap();
+                let mut place_before = place_before.clone();
+                for (new_parent, indent) in create_parents.into_iter() {
+                    place_parent.insert_before(&new_parent, place_before.as_ref()).unwrap();
                     place_parent = new_parent;
+                    place_before = None;
                     indents.push(indent);
                 }
-                place_parent.append_child(&line).unwrap();
+                place_parent.insert_before(&line, place_before.as_ref()).unwrap();
             }
 
             // Place remaining lines
@@ -782,7 +849,10 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         }
 
         // Parse text into inline and sync with line
-        {
+        let offset = Cell::new(0usize);
+        let line_shadowdom = if blockcode_have_parent {
+            generate_line_code_shadowdom(&mut indents, text, blockcode_is_end)
+        } else {
             // Parse line type
             let line_type;
             if let Ok(parsed) = ReHeadingPrefix::from_str(&text) {
@@ -796,15 +866,9 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             let inline = linemarkdown::parse(&text);
 
             // Generate and sync
-            let offset = Cell::new(0usize);
-            line =
-                sync_shadow_dom(
-                    &mut cursor,
-                    &offset,
-                    &line,
-                    generate_line_shadowdom(line_type, &mut indents, inline),
-                );
-        }
+            generate_line_shadowdom(line_type, &mut indents, inline)
+        };
+        line = sync_shadow_dom(&mut cursor, &offset, &line, line_shadowdom);
 
         // Update indents
         {
@@ -836,13 +900,9 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                     set_indent(&root, indent_block, &get_aligned(id), width, true);
                 } else {
                     let style = child.dyn_ref::<HtmlElement>().unwrap().style();
-                    let want_prop =
-                        format!(
-                            "{}px",
-                            indent_block.get_bounding_client_rect().left() - child.get_bounding_client_rect().left()
-                        );
-                    if style.get_property_value("left").unwrap() != want_prop {
-                        style.set_property("left", &want_prop).unwrap();
+                    let left = calculate_indent_alignment(&indent_block, &child, &style);
+                    if (left.have - left.want).abs() > 0.5 {
+                        style.set_property("left", &format!("{}px", left.want)).unwrap();
                     }
                 }
             }
@@ -897,11 +957,12 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                     let (_, e_block) =
                         generate_el_block_indent(&mut ctx.ids.borrow_mut(), BlockType::BlockCode, CLASS_BLOCKCODE);
                     let mut children = vec![];
-                    for child in block {
+                    let block_len = block.len();
+                    for (i, child) in block.into_iter().enumerate() {
                         children.push(
                             generate_shadow_dom(
                                 &Cell::new(0usize),
-                                generate_line_shadowdom(LineType::Code, &mut ctx.indents, vec![Inline::Text(child)]),
+                                generate_line_code_shadowdom(&mut ctx.indents, child, i + 1 == block_len),
                             ),
                         );
                     }
@@ -1148,7 +1209,7 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                 let Ok(node) = node.dyn_into() else {
                     return;
                 };
-                let forward;
+                let direction;
 
                 enum KeyDimension {
                     Vert,
@@ -1159,27 +1220,27 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                 match event.key().as_str() {
                     "ArrowLeft" => {
                         dim = KeyDimension::Horiz;
-                        forward = false;
+                        direction = ScanDirection::Backward;
                     },
                     "ArrowRight" => {
                         dim = KeyDimension::Horiz;
-                        forward = true;
+                        direction = ScanDirection::Forward;
                     },
                     "ArrowUp" => {
                         dim = KeyDimension::Vert;
-                        forward = false;
+                        direction = ScanDirection::Backward;
                     },
                     "ArrowDown" => {
                         dim = KeyDimension::Vert;
-                        forward = true;
+                        direction = ScanDirection::Forward;
                     },
                     "Backspace" => {
                         dim = KeyDimension::Horiz;
-                        forward = false;
+                        direction = ScanDirection::Backward;
                     },
                     "Delete" => {
                         dim = KeyDimension::Horiz;
-                        forward = true;
+                        direction = ScanDirection::Forward;
                     },
                     _ => {
                         return;
@@ -1208,7 +1269,7 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                         if !sel.is_collapsed() {
                             return;
                         }
-                        if !forward && sel.anchor_offset() == 0 {
+                        if direction == ScanDirection::Backward && sel.anchor_offset() == 0 {
                             let Some(prev) =
                                 dom::scan(
                                     &node,
@@ -1220,7 +1281,8 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                                     return;
                                 };
                             dom::select(&prev, prev.text_content().unwrap().len());
-                        } else if forward && sel.anchor_offset() as usize == node.text_content().unwrap().len() {
+                        } else if direction == ScanDirection::Forward &&
+                            sel.anchor_offset() as usize == node.text_content().unwrap().len() {
                             let Some(next) =
                                 dom::scan(
                                     &node,
@@ -1239,25 +1301,45 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                     KeyDimension::Vert => {
                         // This prevents default handling so this is the only handler; it moves to the
                         // exact desired location.
-                        let dest_line = if !forward {
-                            let Some(prev) =
-                                line_scan(&node, ScanDirection::Backward, ScanInclusivity::Exclusive) else {
+                        let current_sel_box = sel.get_range_at(0).unwrap().get_bounding_client_rect();
+
+                        // Use the line instead of the current node because we care about moves between
+                        // block elements and need the full line box
+                        let mut node = node;
+                        while !is_line(&node) {
+                            node = node.parent_node().unwrap();
+                        }
+                        let current_node_box = dom::bounds(&node);
+                        let dest_line = match direction {
+                            ScanDirection::Backward => {
+                                if -(current_node_box.top() - current_sel_box.top()) / current_sel_box.height() > 0.4 {
+                                    // Multiline node, cursor not in top line
                                     return;
-                                };
-                            prev
-                        } else {
-                            let Some(next) =
-                                line_scan(&node, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
+                                }
+                                let Some(prev) =
+                                    line_scan(&node, ScanDirection::Backward, ScanInclusivity::Exclusive) else {
+                                        return;
+                                    };
+                                prev
+                            },
+                            ScanDirection::Forward => {
+                                if (current_node_box.bottom() - current_sel_box.bottom()) / current_sel_box.height() >
+                                    0.4 {
+                                    // Multiline node, cursor not in bottom line
                                     return;
-                                };
-                            next
+                                }
+                                let Some(next) =
+                                    line_scan(&node, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
+                                        return;
+                                    };
+                                next
+                            },
                         };
-                        let x = sel.get_range_at(0).unwrap().get_bounding_client_rect().left();
-                        let y = {
-                            let r = document().create_range().unwrap();
-                            r.select_node(&dest_line).unwrap();
-                            let dest_box = r.get_bounding_client_rect();
-                            dest_box.top() + dest_box.height() / 2.
+                        let x = current_sel_box.x();
+                        let dest_box = dom::bounds(&dest_line);
+                        let y = match direction {
+                            ScanDirection::Backward => dest_box.bottom() - 5.,
+                            ScanDirection::Forward => dest_box.top() + 5.,
                         };
                         let Some(caret) = document().caret_position_from_point(x as f32, y as f32) else {
                             return;
@@ -1268,20 +1350,20 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
 
                         // This seems to be an offset into all text into the node... I think it's a bug,
                         // but this could work around by walking text nodes until the offset.
-                        if let Some(mut at) = dom::scan(&caret_node, is_root, is_text, ScanDirection::Forward, ScanInclusivity::Inclusive) {
+                        if let Some(mut caret_text_node) = dom::scan(&caret_node, is_root, is_text, direction, ScanInclusivity::Inclusive) {
                             let mut offset = 0;
                             loop {
-                                let at_text = at.text_content().unwrap();
+                                let at_text = caret_text_node.text_content().unwrap();
                                 let len = at_text.len();
                                 if offset + len >= caret.offset() as usize {
-                                    dom::select(&at, caret.offset() as usize - offset);
+                                    dom::select(&caret_text_node, caret.offset() as usize - offset);
                                     event.prevent_default();
                                     break;
                                 }
                                 offset += len;
                                 let Some(at_temp) =
                                     dom::scan(
-                                        &at,
+                                        &caret_text_node,
                                         is_root,
                                         is_text,
                                         ScanDirection::Forward,
@@ -1289,10 +1371,11 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                                     ) else {
                                         break;
                                     };
-                                at = at_temp;
+                                caret_text_node = at_temp;
                             }
                         } else {
                             dom::select(&caret_node, 0);
+                            event.prevent_default();
                         }
                     },
                 }

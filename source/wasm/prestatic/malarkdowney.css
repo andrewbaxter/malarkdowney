@@ -6,6 +6,10 @@
   min-height: 1em;
 }
 
+codeline {
+  display: block;
+}
+
 .malarkdowney_aligned {
   position: relative;
   display: inline-block;
