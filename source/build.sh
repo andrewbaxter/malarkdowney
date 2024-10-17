@@ -1,2 +1,3 @@
 #!/bin/bash -eu
-cargo run --manifest-path native/Cargo.toml --bin admin build
+cd native
+cargo run --bin admin build

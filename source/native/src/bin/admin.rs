@@ -174,7 +174,7 @@ async fn command_cargo_build(log: &Log, command: &mut Command) -> Result<Vec<Pat
     return Ok(out);
 }
 
-async fn build_web_static(log: &Log, root_dir: &Path, stage_dir: &Path) -> Result<PathBuf, loga::Error> {
+async fn build_web_static(log: &Log, root_dir: &Path, stage_dir: &Path, debug: bool) -> Result<PathBuf, loga::Error> {
     let source_dir = root_dir.join("source/wasm");
     let staging_dir = stage_dir.join("web");
     let static_dir = staging_dir.join("static");
@@ -187,19 +187,23 @@ async fn build_web_static(log: &Log, root_dir: &Path, stage_dir: &Path) -> Resul
     for d in [&static_dir, &bindgen_dir] {
         ensure_dirs(&d).await?;
     }
-    for exe in command_cargo_build(log, Command::new("cargo").arg("build").arg("--target=wasm32-unknown-unknown")
-        //. .arg("--release")
-        .current_dir(&source_dir)).await? {
-        Command::new("wasm-bindgen")
-            .arg(&exe)
-            .arg("--out-dir")
-            .arg(&bindgen_dir)
-            .arg("--target=web")
-            .arg("--split-linked-modules")
-            .arg("--keep-debug")
-            .simple()
-            .run()
-            .await?;
+    let mut build_cmd = Command::new("cargo");
+    build_cmd.current_dir(&source_dir);
+    build_cmd.arg("build");
+    build_cmd.arg("--target=wasm32-unknown-unknown");
+    if !debug {
+        build_cmd.arg("--release");
+    }
+    for exe in command_cargo_build(log, &mut build_cmd).await? {
+        let mut bindgen_cmd = Command::new("wasm-bindgen");
+        bindgen_cmd.arg(&exe);
+        bindgen_cmd.arg("--out-dir").arg(&bindgen_dir);
+        bindgen_cmd.arg("--target=web");
+        bindgen_cmd.arg("--split-linked-modules");
+        if debug {
+            bindgen_cmd.arg("--keep-debug");
+        }
+        bindgen_cmd.simple().run().await?;
         recursive_copy(&bindgen_dir, &static_dir).await?;
     }
     let source_static_dir = root_dir.join(source_dir.join("prestatic"));
@@ -244,12 +248,12 @@ async fn main() {
         match command {
             ArgCommand::Build => {
                 let stage_dir = root_dir.join("stage");
-                let static_dir = build_web_static(&log, &root_dir, &stage_dir).await?;
+                let static_dir = build_web_static(&log, &root_dir, &stage_dir, false).await?;
                 stdout().write_all(static_dir.as_os_str().as_encoded_bytes()).unwrap();
             },
             ArgCommand::DevServer => {
                 let stage_dir = root_dir.join("stage");
-                let static_dir = build_web_static(&log, &root_dir, &stage_dir).await?;
+                let static_dir = build_web_static(&log, &root_dir, &stage_dir, true).await?;
                 let tm = TaskManager::new();
                 let bind_addr = "127.0.0.1:8080";
                 tm.critical_stream(
