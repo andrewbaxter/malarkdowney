@@ -56,6 +56,10 @@ hr {
   margin: -0.3cm;
 }
 
+.malarkdowney_root:focus {
+  outline: none;
+}
+
 .malarkdowney_root,
 .malarkdowney_block {
   & > *:first-child {
