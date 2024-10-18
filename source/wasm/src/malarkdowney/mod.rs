@@ -1270,6 +1270,16 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                             return;
                         }
                         if direction == ScanDirection::Backward && sel.anchor_offset() == 0 {
+                            {
+                                // Allow backspace at root of node, rather than last character of previous line
+                                if is_line(&node) {
+                                    return;
+                                }
+                                let parent = node.parent_element().unwrap();
+                                if is_line(&parent) && parent.first_child().unwrap() == node {
+                                    return;
+                                }
+                            }
                             let Some(prev) =
                                 dom::scan(
                                     &node,
