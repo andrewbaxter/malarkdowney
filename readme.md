@@ -1,1 +1,1 @@
-[True readme (and demo).](https://andrewbaxter.github.io/malarkdowney/)!
+[Experience it here!](https://andrewbaxter.github.io/malarkdowney/) (readme and demo)
