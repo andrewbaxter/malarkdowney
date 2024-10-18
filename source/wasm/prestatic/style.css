@@ -39,6 +39,7 @@ body {
 }
 
 hr {
+  border: none;
   border-top: 0.08cm dashed var(--c-purple);
   margin: var(--s-section-pad) 0;
   width: 100%;
