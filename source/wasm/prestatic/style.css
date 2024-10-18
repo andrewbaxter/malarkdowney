@@ -74,10 +74,7 @@ hr {
 /* ************ */
 
 .malarkdowney_block_code {
-  font-family: monospace;
-  white-space: pre;
   padding: var(--s-line-pad) 0.3cm;
-  font-size: 0.8em;
 }
 
 code.malarkdowney,

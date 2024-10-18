@@ -2,6 +2,17 @@
   white-space-collapse: preserve;
 }
 
+/* Block things */
+/* ************ */
+
+code.malarkdowney,
+.malarkdowney_block_code {
+  font-family: monospace;
+}
+
+/* Line things */
+/* *********** */
+
 .malarkdowney_line {
   min-height: 1em;
 }
