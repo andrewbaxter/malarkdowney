@@ -76,6 +76,7 @@ const NAMESPACE: &str = "malarkdowney";
 const ATTR_ID: &str = formatcp!("{}_id", NAMESPACE);
 const ATTR_INDENT_ID: &str = formatcp!("{}_indent_id", NAMESPACE);
 const ATTR_BLOCK_TYPE: &str = formatcp!("{}_block_type", NAMESPACE);
+const ATTR_BLOCKCODE_BEGIN: &str = formatcp!("{}_codeblock_begin", NAMESPACE);
 const ATTR_BLOCKCODE_END: &str = formatcp!("{}_codeblock_end", NAMESPACE);
 const CLASS_NAMESPACE: &str = NAMESPACE;
 const CLASS_ROOT: &str = formatcp!("{}_root", NAMESPACE);
@@ -150,7 +151,17 @@ fn generate_aligned(out_want_children: &mut Vec<ShadowDom>, indents: &mut [LineI
     }
 }
 
-fn generate_line_code_shadowdom(indents: &mut [LineIndent], text: String, last_line: bool) -> ShadowDom {
+#[derive(Debug, PartialEq, Eq)]
+enum BlockcodeDelim {
+    Begin,
+    End,
+}
+
+fn generate_line_code_shadowdom(
+    indents: &mut [LineIndent],
+    text: String,
+    delim: Option<BlockcodeDelim>,
+) -> ShadowDom {
     let mut want_children = vec![];
     generate_aligned(&mut want_children, indents);
     want_children.push(ShadowDom::Text(text));
@@ -159,8 +170,16 @@ fn generate_line_code_shadowdom(indents: &mut [LineIndent], text: String, last_l
         classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
         attrs: {
             let mut out = HashMap::new();
-            if last_line {
-                out.insert(ATTR_BLOCKCODE_END.to_string(), "1".to_string());
+            out.insert("spellcheck".to_string(), "false".to_string());
+            if let Some(delim) = delim {
+                match delim {
+                    BlockcodeDelim::Begin => {
+                        out.insert(ATTR_BLOCKCODE_BEGIN.to_string(), "1".to_string());
+                    },
+                    BlockcodeDelim::End => {
+                        out.insert(ATTR_BLOCKCODE_END.to_string(), "1".to_string());
+                    },
+                }
             }
             out
         },
@@ -561,7 +580,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         }
 
         // If there's a context line
-        let mut blockcode_have_parent = false;
+        let mut in_blockcode = false;
         let mut blockcode_is_nonfirst = false;
         if let Some(context_line) = context_line {
             // Determine context by walking previous line(/context)'s block parents up to root
@@ -634,7 +653,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                             }
                         };
                         if !context_codeblock_end {
-                            blockcode_have_parent = true;
+                            in_blockcode = true;
                             blockcode_is_nonfirst = true;
                         } else {
                             break;
@@ -733,7 +752,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                     BlockType::BlockCode => {
                         if text.starts_with(PREFIX_BLOCKCODE) {
                             // This must be the first line, otherwise it would be part of the context block
-                            blockcode_have_parent = true;
+                            in_blockcode = true;
                         } else {
                             break;
                         }
@@ -747,7 +766,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
 
         // Check if starting new prefixed blocks
         let mut create_parents = vec![];
-        let mut blockcode_is_end = false;
+        let mut blockcode_delim = None;
         loop {
             if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
                 text = suffix1.to_string();
@@ -782,9 +801,11 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 }));
             } else if text.starts_with(PREFIX_BLOCKCODE) {
                 if blockcode_is_nonfirst {
-                    blockcode_is_end = true;
+                    blockcode_delim = Some(BlockcodeDelim::End);
+                } else {
+                    blockcode_delim = Some(BlockcodeDelim::Begin);
                 }
-                if !blockcode_have_parent {
+                if !in_blockcode {
                     let type_ = BlockType::BlockCode;
                     let (parent_id, parent) =
                         generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKCODE);
@@ -794,6 +815,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                         first_text: None,
                         text: "".to_string(),
                     }));
+                    in_blockcode = true;
                 }
                 break;
             } else {
@@ -850,8 +872,27 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
 
         // Parse text into inline and sync with line
         let offset = Cell::new(0usize);
-        let line_shadowdom = if blockcode_have_parent {
-            generate_line_code_shadowdom(&mut indents, text, blockcode_is_end)
+        let line_shadowdom = if in_blockcode {
+            crate::cprintln!("Update codeline [{}]", text);
+            shed!{
+                let Some(line) = line.dyn_ref::<Element>() else {
+                    changed = true;
+                    break;
+                };
+                let blockcode_was_delim = if line.get_attribute(ATTR_BLOCKCODE_BEGIN).is_some() {
+                    Some(BlockcodeDelim::Begin)
+                } else if line.get_attribute(ATTR_BLOCKCODE_END).is_some() {
+                    Some(BlockcodeDelim::End)
+                } else {
+                    None
+                };
+                crate::cprintln!("Update codeline [{}]", text);
+                if blockcode_was_delim != blockcode_delim {
+                    changed = true;
+                    break;
+                }
+            }
+            generate_line_code_shadowdom(&mut indents, text, blockcode_delim)
         } else {
             // Parse line type
             let line_type;
@@ -962,7 +1003,13 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                         children.push(
                             generate_shadow_dom(
                                 &Cell::new(0usize),
-                                generate_line_code_shadowdom(&mut ctx.indents, child, i + 1 == block_len),
+                                generate_line_code_shadowdom(&mut ctx.indents, child, if i == 0 {
+                                    Some(BlockcodeDelim::Begin)
+                                } else if i + 1 == block_len {
+                                    Some(BlockcodeDelim::End)
+                                } else {
+                                    None
+                                }),
                             ),
                         );
                     }
