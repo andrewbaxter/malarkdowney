@@ -664,6 +664,13 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 place_before = parent_next;
                 indents.push(indent);
             }
+            if let Some(place_before1) = &place_before {
+                if place_before1 == &line {
+                    // `place_before` from context is the next element which is the line or a parent
+                    // of line, and we actually want the line after that.
+                    place_before = place_before1.next_sibling();
+                }
+            }
         }
 
         // Check if in a subtree of the placement root (and figure out the subpath indents)
@@ -674,7 +681,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             let mut next_child = line.next_sibling();
             loop {
                 if at_parent == place_parent {
-                    break 'under_place_parent;
+                    break 'line_under_place_parent;
                 }
                 if at_parent == root {
                     break;
@@ -691,7 +698,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 next_child = at_parent.next_sibling();
                 at_parent = at_parent.parent_element().unwrap();
             }
-        } 'under_place_parent {
+        } 'line_under_place_parent {
             context_line_path.reverse();
 
             // Could be splitting a parent container; get list of following lines to drag
@@ -826,12 +833,43 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         // Move
         let original_parent = line.parent_element().unwrap();
         if place_parent != original_parent || !create_parents.is_empty() {
+            crate::cprintln!(
+                "Move [{}] create parents {:?}; lifting {}",
+                text,
+                create_parents.iter().map(|x| x.1.type_).collect::<Vec<_>>(),
+                lift_following.len()
+            );
             changed = true;
 
             // Lift line + any following elements between the line and the placement root
+            web_sys::console::log_2(&JsValue::from("lifting line"), &JsValue::from(&line));
             line.parent_node().unwrap().remove_child(&line).unwrap();
             for e in &lift_following {
                 e.parent_node().unwrap().remove_child(&e).unwrap();
+            }
+
+            // Create blocks and place this line
+            {
+                let mut place_parent = place_parent.clone();
+                let mut place_before = place_before.clone();
+                for (new_parent, indent) in create_parents.into_iter() {
+                    web_sys::console::log_4(
+                        &JsValue::from("place new parent"),
+                        &JsValue::from(&place_parent),
+                        &JsValue::from(place_before.as_ref()),
+                        &JsValue::from(&new_parent),
+                    );
+                    place_parent.insert_before(&new_parent, place_before.as_ref()).unwrap();
+                    place_parent = new_parent;
+                    place_before = None;
+                    indents.push(indent);
+                }
+                place_parent.insert_before(&line, place_before.as_ref()).unwrap();
+            }
+
+            // Place remaining lines
+            for e in lift_following {
+                place_parent.insert_before(&e, place_before.as_ref()).unwrap();
             }
 
             // (Clean up empty left over blocks/containers)
@@ -850,30 +888,11 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             if let Some(clean_up_until) = clean_up_until {
                 clean_up_until.remove();
             }
-
-            // Create blocks and place this line
-            {
-                let mut place_parent = place_parent.clone();
-                let mut place_before = place_before.clone();
-                for (new_parent, indent) in create_parents.into_iter() {
-                    place_parent.insert_before(&new_parent, place_before.as_ref()).unwrap();
-                    place_parent = new_parent;
-                    place_before = None;
-                    indents.push(indent);
-                }
-                place_parent.insert_before(&line, place_before.as_ref()).unwrap();
-            }
-
-            // Place remaining lines
-            for e in lift_following {
-                place_parent.insert_before(&e, place_before.as_ref()).unwrap();
-            }
         }
 
         // Parse text into inline and sync with line
         let offset = Cell::new(0usize);
         let line_shadowdom = if in_blockcode {
-            crate::cprintln!("Update codeline [{}]", text);
             shed!{
                 let Some(line) = line.dyn_ref::<Element>() else {
                     changed = true;
@@ -886,7 +905,6 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 } else {
                     None
                 };
-                crate::cprintln!("Update codeline [{}]", text);
                 if blockcode_was_delim != blockcode_delim {
                     changed = true;
                     break;
@@ -1366,74 +1384,87 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                         while !is_line(&node) {
                             node = node.parent_node().unwrap();
                         }
-                        let current_node_box = dom::bounds(&node);
-                        let dest_line = match direction {
-                            ScanDirection::Backward => {
-                                if -(current_node_box.top() - current_sel_box.top()) / current_sel_box.height() > 0.4 {
-                                    // Multiline node, cursor not in top line
-                                    return;
-                                }
-                                let Some(prev) =
-                                    line_scan(&node, ScanDirection::Backward, ScanInclusivity::Exclusive) else {
-                                        return;
-                                    };
-                                prev
-                            },
-                            ScanDirection::Forward => {
-                                if (current_node_box.bottom() - current_sel_box.bottom()) / current_sel_box.height() >
-                                    0.4 {
-                                    // Multiline node, cursor not in bottom line
-                                    return;
-                                }
-                                let Some(next) =
-                                    line_scan(&node, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
-                                        return;
-                                    };
-                                next
-                            },
-                        };
-                        let x = current_sel_box.x();
-                        let dest_box = dom::bounds(&dest_line);
-                        let y = match direction {
-                            ScanDirection::Backward => dest_box.bottom() - 5.,
-                            ScanDirection::Forward => dest_box.top() + 5.,
-                        };
-                        let Some(caret) = document().caret_position_from_point(x as f32, y as f32) else {
-                            return;
-                        };
-                        let Some(caret_node) = caret.offset_node() else {
-                            return;
-                        };
+                        let next_cursor = shed!{
+                            'found _;
+                            match direction {
+                                ScanDirection::Backward => {
+                                    for i in 0 .. 3 {
+                                        if let Some(c) =
+                                            document().caret_position_from_point(
+                                                current_sel_box.left() as f32,
+                                                (current_sel_box.top() -
+                                                    current_sel_box.height() * (0.5 + i as f64)) as
+                                                    f32,
+                                            ) {
+                                            let n = c.offset_node().unwrap();
 
-                        // This seems to be an offset into all text into the node... I think it's a bug,
-                        // but this could work around by walking text nodes until the offset.
-                        if let Some(mut caret_text_node) = dom::scan(&caret_node, is_root, is_text, direction, ScanInclusivity::Inclusive) {
-                            let mut offset = 0;
-                            loop {
-                                let at_text = caret_text_node.text_content().unwrap();
-                                let len = at_text.len();
-                                if offset + len >= caret.offset() as usize {
-                                    dom::select(&caret_text_node, caret.offset() as usize - offset);
-                                    event.prevent_default();
-                                    break;
-                                }
-                                offset += len;
-                                let Some(at_temp) =
-                                    dom::scan(
-                                        &caret_text_node,
-                                        is_root,
-                                        is_text,
-                                        ScanDirection::Forward,
-                                        ScanInclusivity::Exclusive,
-                                    ) else {
-                                        break;
-                                    };
-                                caret_text_node = at_temp;
-                            }
-                        } else {
-                            dom::select(&caret_node, 0);
-                            event.prevent_default();
-                        }
+                                            // Check if caret is somehow on the same line, despite math, and only use it if
+                                            // so. Check by the far edge to be particularly sure.
+                                            let new_sel_box = {
+                                                let range = document().create_range().unwrap();
+                                                range.set_start(&n, c.offset()).unwrap();
+                                                range.set_end(&n, c.offset()).unwrap();
+                                                range.get_bounding_client_rect()
+                                            };
+                                            if (new_sel_box.top() - current_sel_box.top()) / new_sel_box.height() <
+                                                -0.4 {
+                                                break 'found c;
+                                            }
+                                        }
+                                    }
+                                },
+                                ScanDirection::Forward => {
+                                    for i in 0 .. 3 {
+                                        if let Some(c) =
+                                            document().caret_position_from_point(
+                                                current_sel_box.left() as f32,
+                                                (current_sel_box.bottom() +
+                                                    current_sel_box.height() * (0.5 + i as f64)) as
+                                                    f32,
+                                            ) {
+                                            let n = c.offset_node().unwrap();
+
+                                            // Check if caret is somehow on the same line, despite math, and only use it if so
+                                            let new_sel_box = {
+                                                let range = document().create_range().unwrap();
+                                                range.set_start(&n, c.offset()).unwrap();
+                                                range.set_end(&n, c.offset()).unwrap();
+                                                range.get_bounding_client_rect()
+                                            };
+                                            crate::cprintln!(
+                                                "down, next: {} - {} l {}, sel {} - {} l {}",
+                                                current_sel_box.top(),
+                                                current_sel_box.bottom(),
+                                                current_sel_box.left(),
+                                                new_sel_box.top(),
+                                                new_sel_box.bottom(),
+                                                new_sel_box.left()
+                                            );
+                                            if (new_sel_box.bottom() - current_sel_box.bottom()) /
+                                                new_sel_box.height() >
+                                                0.4 {
+                                                break 'found c;
+                                            }
+                                            crate::cprintln!(
+                                                "down, overlaps current line: {} - {}, sel {} - {}, res {}",
+                                                current_sel_box.top(),
+                                                current_sel_box.bottom(),
+                                                new_sel_box.top(),
+                                                new_sel_box.bottom(),
+                                                (new_sel_box.bottom() - current_sel_box.bottom()) /
+                                                    new_sel_box.height()
+                                            );
+                                        }
+                                    }
+                                },
+                            };
+                            return;
+                        };
+                        let Some(next_cursor_node) = next_cursor.offset_node() else {
+                            return;
+                        };
+                        dom::select(&next_cursor_node, next_cursor.offset() as usize);
+                        event.prevent_default();
                     },
                 }
             },
