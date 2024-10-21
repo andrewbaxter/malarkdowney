@@ -1384,87 +1384,74 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> El {
                         while !is_line(&node) {
                             node = node.parent_node().unwrap();
                         }
-                        let next_cursor = shed!{
-                            'found _;
-                            match direction {
-                                ScanDirection::Backward => {
-                                    for i in 0 .. 3 {
-                                        if let Some(c) =
-                                            document().caret_position_from_point(
-                                                current_sel_box.left() as f32,
-                                                (current_sel_box.top() -
-                                                    current_sel_box.height() * (0.5 + i as f64)) as
-                                                    f32,
-                                            ) {
-                                            let n = c.offset_node().unwrap();
-
-                                            // Check if caret is somehow on the same line, despite math, and only use it if
-                                            // so. Check by the far edge to be particularly sure.
-                                            let new_sel_box = {
-                                                let range = document().create_range().unwrap();
-                                                range.set_start(&n, c.offset()).unwrap();
-                                                range.set_end(&n, c.offset()).unwrap();
-                                                range.get_bounding_client_rect()
-                                            };
-                                            if (new_sel_box.top() - current_sel_box.top()) / new_sel_box.height() <
-                                                -0.4 {
-                                                break 'found c;
-                                            }
-                                        }
-                                    }
-                                },
-                                ScanDirection::Forward => {
-                                    for i in 0 .. 3 {
-                                        if let Some(c) =
-                                            document().caret_position_from_point(
-                                                current_sel_box.left() as f32,
-                                                (current_sel_box.bottom() +
-                                                    current_sel_box.height() * (0.5 + i as f64)) as
-                                                    f32,
-                                            ) {
-                                            let n = c.offset_node().unwrap();
-
-                                            // Check if caret is somehow on the same line, despite math, and only use it if so
-                                            let new_sel_box = {
-                                                let range = document().create_range().unwrap();
-                                                range.set_start(&n, c.offset()).unwrap();
-                                                range.set_end(&n, c.offset()).unwrap();
-                                                range.get_bounding_client_rect()
-                                            };
-                                            crate::cprintln!(
-                                                "down, next: {} - {} l {}, sel {} - {} l {}",
-                                                current_sel_box.top(),
-                                                current_sel_box.bottom(),
-                                                current_sel_box.left(),
-                                                new_sel_box.top(),
-                                                new_sel_box.bottom(),
-                                                new_sel_box.left()
-                                            );
-                                            if (new_sel_box.bottom() - current_sel_box.bottom()) /
-                                                new_sel_box.height() >
-                                                0.4 {
-                                                break 'found c;
-                                            }
-                                            crate::cprintln!(
-                                                "down, overlaps current line: {} - {}, sel {} - {}, res {}",
-                                                current_sel_box.top(),
-                                                current_sel_box.bottom(),
-                                                new_sel_box.top(),
-                                                new_sel_box.bottom(),
-                                                (new_sel_box.bottom() - current_sel_box.bottom()) /
-                                                    new_sel_box.height()
-                                            );
-                                        }
-                                    }
-                                },
-                            };
+                        let current_node_box = dom::bounds(&node);
+                        let dest_line = match direction {
+                            ScanDirection::Backward => {
+                                if -(current_node_box.top() - current_sel_box.top()) / current_sel_box.height() > 0.4 {
+                                    // Multiline node, cursor not in top line
+                                    return;
+                                }
+                                let Some(prev) =
+                                    line_scan(&node, ScanDirection::Backward, ScanInclusivity::Exclusive) else {
+                                        return;
+                                    };
+                                prev
+                            },
+                            ScanDirection::Forward => {
+                                if (current_node_box.bottom() - current_sel_box.bottom()) / current_sel_box.height() >
+                                    0.4 {
+                                    // Multiline node, cursor not in bottom line
+                                    return;
+                                }
+                                let Some(next) =
+                                    line_scan(&node, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
+                                        return;
+                                    };
+                                next
+                            },
+                        };
+                        let x = current_sel_box.x();
+                        let dest_box = dom::bounds(&dest_line);
+                        let y = match direction {
+                            ScanDirection::Backward => dest_box.bottom() - 5.,
+                            ScanDirection::Forward => dest_box.top() + 5.,
+                        };
+                        let Some(caret) = document().caret_position_from_point(x as f32, y as f32) else {
                             return;
                         };
-                        let Some(next_cursor_node) = next_cursor.offset_node() else {
+                        let Some(caret_node) = caret.offset_node() else {
                             return;
                         };
-                        dom::select(&next_cursor_node, next_cursor.offset() as usize);
-                        event.prevent_default();
+
+                        // This seems to be an offset into all text into the node... I think it's a bug,
+                        // but this could work around by walking text nodes until the offset.
+                        if let Some(mut caret_text_node) = dom::scan(&caret_node, is_root, is_text, direction, ScanInclusivity::Inclusive) {
+                            let mut offset = 0;
+                            loop {
+                                let at_text = caret_text_node.text_content().unwrap();
+                                let len = at_text.len();
+                                if offset + len >= caret.offset() as usize {
+                                    dom::select(&caret_text_node, caret.offset() as usize - offset);
+                                    event.prevent_default();
+                                    break;
+                                }
+                                offset += len;
+                                let Some(at_temp) =
+                                    dom::scan(
+                                        &caret_text_node,
+                                        is_root,
+                                        is_text,
+                                        ScanDirection::Forward,
+                                        ScanInclusivity::Exclusive,
+                                    ) else {
+                                        break;
+                                    };
+                                caret_text_node = at_temp;
+                            }
+                        } else {
+                            dom::select(&caret_node, 0);
+                            event.prevent_default();
+                        }
                     },
                 }
             },
