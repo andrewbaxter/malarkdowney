@@ -61,6 +61,7 @@ fn main() {
                         " are always visible, simultaneously resolving cursor ambiguity and providing feedback on the final style.",
                     )
                 ]),
+                Block::Line(vec![text("(This text is editable.)")]),
             ],
         );
     set_root(vec![m.clone(), el("hr"), el("p").classes(&["footnote"]).extend(vec![
