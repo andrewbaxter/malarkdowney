@@ -145,6 +145,10 @@ fn parse_inline(c: &mut Cursor, want_end: Option<char>) -> Vec<Inline> {
                     children.extend(text.flush());
                     children.push(parse_strong(c));
                 },
+                STRIKE_DELIM => {
+                    children.extend(text.flush());
+                    children.push(parse_strike(c));
+                },
                 EMPHASIS_DELIM => {
                     children.extend(text.flush());
                     children.push(parse_emphasis(c));
@@ -167,6 +171,7 @@ fn parse_inline(c: &mut Cursor, want_end: Option<char>) -> Vec<Inline> {
 
 const ESCAPE: char = '\\';
 pub const STRONG_DELIM: char = '*';
+pub const STRIKE_DELIM: char = '~';
 pub const EMPHASIS_DELIM: char = '_';
 pub const CODE_DELIM: char = '`';
 pub const LINK_BEGIN_DELIM: char = '[';
@@ -174,52 +179,52 @@ pub const LINK_END_DELIM: char = ']';
 pub const LINK_ADDR_BEGIN_DELIM: char = '(';
 pub const LINK_ADDR_END_DELIM: char = ')';
 
-fn parse_strong(c: &mut Cursor) -> Inline {
+fn parse_symmetric(
+    c: &mut Cursor,
+    delim: char,
+    build: impl FnOnce(Vec<Inline>, String, Option<String>) -> Inline,
+) -> Inline {
     let mut complete = false;
-    let children = parse_inline(c, Some(STRONG_DELIM));
+    let children = parse_inline(c, Some(delim));
     shed!{
         let Some(next) = c.read() else {
             break;
         };
-        if next != STRONG_DELIM {
+        if next != delim {
             c.undo();
             break;
         }
         complete = true;
     }
-    return Inline::Strong(InlineStrong {
-        begin_delim: STRONG_DELIM.to_string(),
-        children: children,
-        end_delim: if complete {
-            Some(STRONG_DELIM.to_string())
-        } else {
-            None
-        },
+    return build(children, delim.to_string(), if complete {
+        Some(delim.to_string())
+    } else {
+        None
     });
 }
 
-fn parse_emphasis(c: &mut Cursor) -> Inline {
-    let mut complete = false;
-    let children = parse_inline(c, Some(EMPHASIS_DELIM));
-    shed!{
-        let Some(next) = c.read() else {
-            break;
-        };
-        if next != EMPHASIS_DELIM {
-            c.undo();
-            break;
-        }
-        complete = true;
-    }
-    return Inline::Emphasis(InlineEmphasis {
-        begin_delim: EMPHASIS_DELIM.to_string(),
+fn parse_strong(c: &mut Cursor) -> Inline {
+    return parse_symmetric(c, STRONG_DELIM, |children, begin_delim, end_delim| Inline::Strong(InlineStrong {
+        begin_delim: begin_delim,
         children: children,
-        end_delim: if complete {
-            Some(EMPHASIS_DELIM.to_string())
-        } else {
-            None
-        },
-    });
+        end_delim: end_delim,
+    }));
+}
+
+fn parse_strike(c: &mut Cursor) -> Inline {
+    return parse_symmetric(c, STRIKE_DELIM, |children, begin_delim, end_delim| Inline::Strong(InlineStrong {
+        begin_delim: begin_delim,
+        children: children,
+        end_delim: end_delim,
+    }));
+}
+
+fn parse_emphasis(c: &mut Cursor) -> Inline {
+    return parse_symmetric(c, EMPHASIS_DELIM, |children, begin_delim, end_delim| Inline::Strong(InlineStrong {
+        begin_delim: begin_delim,
+        children: children,
+        end_delim: end_delim,
+    }));
 }
 
 fn parse_code(c: &mut Cursor) -> Inline {
