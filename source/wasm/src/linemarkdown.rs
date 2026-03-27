@@ -21,6 +21,13 @@ pub struct InlineEmphasis {
 }
 
 #[derive(Debug)]
+pub struct InlineStrikethrough {
+    pub begin_delim: String,
+    pub children: Vec<Inline>,
+    pub end_delim: Option<String>,
+}
+
+#[derive(Debug)]
 pub struct InlineLink {
     pub incomplete: bool,
     // `[`
@@ -56,6 +63,7 @@ pub enum Inline {
     Text(String),
     Strong(InlineStrong),
     Emphasis(InlineEmphasis),
+    Strikethrough(InlineStrikethrough),
     Link(InlineLink),
     Code(InlineCode),
 }

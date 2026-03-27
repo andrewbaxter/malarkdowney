@@ -1,17 +1,14 @@
 use {
-    rooting::{
-        el,
-        set_root,
-    },
-    wasm::malarkdowney::{
+    gloo::utils::document,
+    malarkdowney::{
         self,
+        Block,
         linemarkdown::{
             code,
             emphasis,
             strong,
             text,
         },
-        Block,
     },
 };
 
@@ -64,10 +61,30 @@ fn main() {
                 Block::Line(vec![text("(This text is editable.)")]),
             ],
         );
-    set_root(vec![m.clone(), el("hr"), el("p").classes(&["footnote"]).extend(vec![
-        //. .
-        el("span").text("From "),
-        el("a").attr("href", "https://github.com/andrewbaxter/malarkdowney").text("andrewbaxter/malarkdowney"),
-        el("span").text(", with love and bountiful markdowns")
-    ])]);
+    document().append_child(&m).unwrap();
+    document().append_child(&{
+        let e = document().create_element("hr").unwrap();
+        e
+    }.into()).unwrap();
+    document().append_child(&{
+        let e = document().create_element("p").unwrap();
+        e.class_list().add_1("footnote").unwrap();
+        e.append_child(&{
+            let e = document().create_element("span").unwrap();
+            e.set_text_content(Some("From "));
+            e
+        }.into()).unwrap();
+        e.append_child(&{
+            let e = document().create_element("a").unwrap();
+            e.set_attribute("href", "https://github.com/andrewbaxter/malarkdowney").unwrap();
+            e.set_text_content(Some("andrewbaxter/malarkdowney"));
+            e
+        }.into()).unwrap();
+        e.append_child(&{
+            let e = document().create_element("span").unwrap();
+            e.set_text_content(Some(", with love and bountiful markdowns"));
+            e
+        }.into()).unwrap();
+        e
+    }.into()).unwrap();
 }
