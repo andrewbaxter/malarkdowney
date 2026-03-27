@@ -212,11 +212,15 @@ fn parse_strong(c: &mut Cursor) -> Inline {
 }
 
 fn parse_strike(c: &mut Cursor) -> Inline {
-    return parse_symmetric(c, STRIKE_DELIM, |children, begin_delim, end_delim| Inline::Strong(InlineStrong {
-        begin_delim: begin_delim,
-        children: children,
-        end_delim: end_delim,
-    }));
+    return parse_symmetric(
+        c,
+        STRIKE_DELIM,
+        |children, begin_delim, end_delim| Inline::Strikethrough(InlineStrikethrough {
+            begin_delim: begin_delim,
+            children: children,
+            end_delim: end_delim,
+        }),
+    );
 }
 
 fn parse_emphasis(c: &mut Cursor) -> Inline {
