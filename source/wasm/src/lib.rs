@@ -26,10 +26,10 @@ use {
         Serialize,
     },
     shadowdom::{
-        generate_shadow_dom,
-        sync_shadow_dom,
         ShadowDom,
         ShadowDomElement,
+        generate_shadow_dom,
+        sync_shadow_dom,
     },
     std::{
         borrow::Cow,
@@ -45,10 +45,12 @@ use {
         str::FromStr,
     },
     structre::structre,
+    tsify::Tsify,
     wasm_bindgen::{
-        closure::Closure,
         JsCast,
         JsValue,
+        closure::Closure,
+        prelude::wasm_bindgen,
     },
     web_sys::{
         CharacterData,
@@ -89,7 +91,8 @@ const PREFIX_UL: &str = "   ";
 const PREFIX_BLOCKQUOTE: &str = "> ";
 const PREFIX_BLOCKCODE: &str = "```";
 
-#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+#[derive(Serialize, Deserialize, Clone, Copy)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
 enum BlockType {
     BlockQuote,
     Ul,
@@ -110,6 +113,9 @@ fn css_id_block(id: usize) -> String {
     return format!("{}_indent_{}", NAMESPACE, id);
 }
 
+#[derive(Serialize, Deserialize, Clone, Tsify)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub enum Block {
     // Level starts from 1
     Heading(usize, Vec<Inline>),
@@ -498,6 +504,22 @@ fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str)
     return (id, e);
 }
 
+fn recurse_get_text(n: &Node, out_cursor: &mut Option<usize>, out_text: &mut String, sel: &Option<(Node, usize)>) {
+    if let Some((sel_n, sel_offset)) = sel {
+        if sel_n == n {
+            *out_cursor = Some(out_text.len() + sel_offset);
+        }
+    }
+    if n.node_type() == Node::TEXT_NODE {
+        out_text.push_str(&n.node_value().unwrap());
+    } else if n.node_type() == Node::ELEMENT_NODE {
+        let nodes = n.child_nodes();
+        for i in 0 .. nodes.length() {
+            recurse_get_text(&nodes.item(i).unwrap(), out_cursor, out_text, sel);
+        }
+    }
+}
+
 struct UpdateLinesStartingAtCtx {
     ids: Rc<RefCell<usize>>,
 }
@@ -565,28 +587,6 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 break None;
             }
         };
-
-        fn recurse_get_text(
-            n: &Node,
-            out_cursor: &mut Option<usize>,
-            out_text: &mut String,
-            sel: &Option<(Node, usize)>,
-        ) {
-            if let Some((sel_n, sel_offset)) = sel {
-                if sel_n == n {
-                    *out_cursor = Some(out_text.len() + sel_offset);
-                }
-            }
-            if n.node_type() == Node::TEXT_NODE {
-                out_text.push_str(&n.node_value().unwrap());
-            } else if n.node_type() == Node::ELEMENT_NODE {
-                let nodes = n.child_nodes();
-                for i in 0 .. nodes.length() {
-                    recurse_get_text(&nodes.item(i).unwrap(), out_cursor, out_text, sel);
-                }
-            }
-        }
-
         let mut text = String::new();
         let mut cursor = None;
         recurse_get_text(&line, &mut cursor, &mut text, &sel);
@@ -986,7 +986,8 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
     }
 }
 
-pub fn build(initial: impl IntoIterator<Item = Block>) -> Element {
+#[wasm_bindgen]
+pub fn build(initial: Vec<Block>) -> Element {
     let ids = Rc::new(RefCell::new(0usize));
 
     // Create initial tree
@@ -1459,3 +1460,37 @@ pub fn build(initial: impl IntoIterator<Item = Block>) -> Element {
     // Done
     return root;
 }
+
+pub fn get_text_lines(root: &Element) -> Vec<String> {
+    let mut out = vec![];
+    let mut line = line_scan(root, ScanDirection::Forward, ScanInclusivity::Exclusive);
+    while let Some(line1) = line {
+        let mut line_text = String::new();
+        recurse_get_text(&line1, &mut Default::default(), &mut line_text, &mut Default::default());
+        out.push(line_text);
+        line = line_scan(&line1, ScanDirection::Forward, ScanInclusivity::Exclusive);
+    }
+    return out;
+}
+
+#[wasm_bindgen]
+pub fn get_text(root: &Element) -> String {
+    return get_text_lines(root).join("\n");
+}
+
+#[wasm_bindgen]
+pub fn get_structured(root: &Element) -> Vec<Block> {
+    let mut out = vec![];
+    for line in get_text_lines(root) {
+        out.push(Block::Code(()))
+    }
+    let text = get_text(root);
+}
+
+#[wasm_bindgen]
+pub fn set_structured(root: &Element, data: Vec<Block>) { }
+
+#[wasm_bindgen]
+pub fn parse_text(text: String) -> Vec<Block> { }
+
+pub fn format_structured(structured: Vec<Block>) -> String { }

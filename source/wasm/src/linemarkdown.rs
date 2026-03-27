@@ -1,33 +1,49 @@
 use {
     flowcontrol::shed,
+    serde::{
+        Deserialize,
+        Serialize,
+    },
     std::{
         mem::swap,
         str::Chars,
     },
+    tsify::Tsify,
+    wasm_bindgen::{
+        prelude::wasm_bindgen,
+    },
 };
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct InlineStrong {
     pub begin_delim: String,
     pub children: Vec<Inline>,
     pub end_delim: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct InlineEmphasis {
     pub begin_delim: String,
     pub children: Vec<Inline>,
     pub end_delim: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct InlineStrikethrough {
     pub begin_delim: String,
     pub children: Vec<Inline>,
     pub end_delim: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct InlineLink {
     pub incomplete: bool,
     // `[`
@@ -36,14 +52,18 @@ pub struct InlineLink {
     pub continuation: Option<InlineLinkContinuation>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct InlineLinkContinuation {
     // `]`
     pub title_end_delim: String,
     pub address: Option<InlineLinkAddress>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct InlineLinkAddress {
     // `(`
     pub begin_delim: String,
@@ -52,13 +72,17 @@ pub struct InlineLinkAddress {
     pub end_delim: String,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub struct InlineCode {
     pub incomplete: bool,
     pub text: String,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize, Clone, Tsify, Debug)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[tsify(into_wasm_abi, from_wasm_abi)]
 pub enum Inline {
     Text(String),
     Strong(InlineStrong),

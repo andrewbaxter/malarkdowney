@@ -16,7 +16,7 @@ fn main() {
     console_error_panic_hook::set_once();
     let m =
         malarkdowney::build(
-            [
+            vec![
                 Block::Heading(1, vec![text("# What is this malarkdowney")]),
                 Block::Heading(2, vec![text("## It is a visual markdown editor")]),
                 Block::Line(vec![text(
