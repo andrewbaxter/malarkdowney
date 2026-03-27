@@ -61,12 +61,13 @@ fn main() {
                 Block::Line(vec![text("(This text is editable.)")]),
             ],
         );
-    document().append_child(&m).unwrap();
-    document().append_child(&{
+    let body = document().body().unwrap();
+    body.append_child(&m).unwrap();
+    body.append_child(&{
         let e = document().create_element("hr").unwrap();
         e
     }.into()).unwrap();
-    document().append_child(&{
+    body.append_child(&{
         let e = document().create_element("p").unwrap();
         e.class_list().add_1("footnote").unwrap();
         e.append_child(&{
