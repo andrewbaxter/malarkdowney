@@ -262,7 +262,7 @@ async fn main() {
                         TcpListener::bind(bind_addr).await.stack_context(&log, "Error binding to address")?,
                     ),
                     {
-                        let log = log.fork(ea!(sys = "stand-game-api"));
+                        let log = log.fork(ea!(sys = "dev-server"));
 
                         struct Handler {
                             log: Log,

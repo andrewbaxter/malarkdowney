@@ -153,6 +153,12 @@ h6.malarkdowney {
 
 p.malarkdowney {
   margin: var(--s-line-pad) 0;
+
+  &:empty {
+    margin: calc(var(--s-line-pad) * -0.5) 0;
+    line-height: 0.2em;
+    min-height: 0.5em;
+  }
 }
 
 codeline.malarkdowney {

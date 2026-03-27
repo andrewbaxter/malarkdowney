@@ -28,7 +28,6 @@ use {
     shadowdom::{
         ShadowDom,
         ShadowDomElement,
-        generate_shadow_dom,
         sync_shadow_dom,
     },
     std::{
@@ -87,6 +86,7 @@ const CLASS_UL: &str = formatcp!("{}_block_ul", NAMESPACE);
 const CLASS_OL: &str = formatcp!("{}_block_ol", NAMESPACE);
 const CLASS_PSEUDO_A: &str = formatcp!("{}_inline_pseudo_a", NAMESPACE);
 const PREFIX_UL_FIRST: &str = "* ";
+const PREFIX_UL_FIRST2: &str = "- ";
 const PREFIX_UL: &str = "   ";
 const PREFIX_BLOCKQUOTE: &str = "> ";
 const PREFIX_BLOCKCODE: &str = "```";
@@ -109,7 +109,7 @@ fn class_aligned(id: usize) -> String {
     return format!("{}_aligned_{}", NAMESPACE, id);
 }
 
-fn css_id_block(id: usize) -> String {
+fn css_class_block(id: usize) -> String {
     return format!("{}_indent_{}", NAMESPACE, id);
 }
 
@@ -359,9 +359,9 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
     });
 }
 
-fn get_aligned(id: usize) -> Vec<Element> {
+fn get_aligned(root: &Element, id: usize) -> Vec<Element> {
     let mut out = vec![];
-    let aligned = document().get_elements_by_class_name(&class_aligned(id));
+    let aligned = root.get_elements_by_class_name(&class_aligned(id));
     for i in 0 .. aligned.length() {
         out.push(aligned.item(i).unwrap().dyn_into::<Element>().unwrap());
     }
@@ -406,12 +406,18 @@ fn set_indent(root: &Element, indent_block: Element, aligned: &Vec<Element>, wid
     indent_block.style().set_property("padding-left", &format!("{}px", width)).unwrap();
 
     // Recursively update child blocks and all line alignments
-    fn do_recurse(root_left: f64, indent_block: &Element, aligned: Option<&Vec<Element>>, recurse: bool) {
+    fn do_recurse(
+        root: &Element,
+        root_left: f64,
+        indent_block: &Element,
+        aligned: Option<&Vec<Element>>,
+        recurse: bool,
+    ) {
         let aligned = match aligned {
             Some(a) => Cow::Borrowed(a),
             None => {
                 let id = indent_block.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
-                Cow::Owned(get_aligned(id))
+                Cow::Owned(get_aligned(root, id))
             },
         };
         for e in aligned.as_ref() {
@@ -426,27 +432,12 @@ fn set_indent(root: &Element, indent_block: Element, aligned: &Vec<Element>, wid
                 continue;
             };
             if recurse && child.class_list().contains(CLASS_BLOCK) {
-                do_recurse(root_left, &child, None, recurse);
+                do_recurse(root, root_left, &child, None, recurse);
             }
         }
     }
 
-    do_recurse(root_left, &indent_block, Some(aligned), recurse);
-}
-
-fn get_aligned_max_width(aligned: &Vec<Element>) -> f32 {
-    let mut max_width = 0.;
-    for e in aligned {
-        // Get inner text that actually has width
-        let Some(inner) = e.first_element_child() else {
-            continue;
-        };
-        let width = inner.get_bounding_client_rect().width() as f32;
-        if width > max_width {
-            max_width = width;
-        }
-    }
-    return max_width;
+    do_recurse(root, root_left, &indent_block, Some(aligned), recurse);
 }
 
 fn is_line(node: &Node) -> bool {
@@ -493,12 +484,10 @@ struct ReHeadingPrefix {
 }
 
 fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str) -> (usize, Element) {
-    let d = document();
-    let e = d.create_element("div").unwrap();
-    e.class_list().add_2(CLASS_BLOCK, type_class).unwrap();
+    let e = document().create_element("div").unwrap();
     let id = *ids;
     *ids += 1;
-    e.set_id(&css_id_block(id));
+    e.class_list().add_3(CLASS_BLOCK, type_class, &css_class_block(id)).unwrap();
     e.set_attribute(ATTR_ID, &id.to_string()).unwrap();
     e.set_attribute(ATTR_BLOCK_TYPE, &serde_json::to_string(&type_).unwrap()).unwrap();
     return (id, e);
@@ -645,6 +634,10 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                             text = suffix1.to_string();
                             indent.first_text = Some(PREFIX_UL_FIRST.to_string());
                             indent.text = PREFIX_UL.to_string();
+                        } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST2) {
+                            text = suffix1.to_string();
+                            indent.first_text = Some(PREFIX_UL_FIRST2.to_string());
+                            indent.text = PREFIX_UL.to_string();
                         } else if let Some(suffix1) = text.strip_prefix(&indent.text) {
                             text = suffix1.to_string();
                         } else {
@@ -763,6 +756,10 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                             text = suffix1.to_string();
                             indent.first_text = Some(PREFIX_UL_FIRST.to_string());
                             indent.text = PREFIX_UL.to_string();
+                        } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST2) {
+                            text = suffix1.to_string();
+                            indent.first_text = Some(PREFIX_UL_FIRST2.to_string());
+                            indent.text = PREFIX_UL.to_string();
                         } else {
                             break;
                         }
@@ -814,6 +811,16 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                     source_indent: parent_id,
                     type_: type_,
                     first_text: Some(PREFIX_UL_FIRST.to_string()),
+                    text: PREFIX_UL.to_string(),
+                }));
+            } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST2) {
+                text = suffix1.to_string();
+                let type_ = BlockType::Ul;
+                let (parent_id, parent) = generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_UL);
+                create_parents.push((parent, LineIndent {
+                    source_indent: parent_id,
+                    type_: type_,
+                    first_text: Some(PREFIX_UL_FIRST2.to_string()),
                     text: PREFIX_UL.to_string(),
                 }));
             } else if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
@@ -937,42 +944,51 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         line = sync_shadow_dom(&mut cursor, &offset, &line, line_shadowdom);
 
         // Update indents
-        {
-            let children = line.dyn_ref::<Element>().unwrap().children();
-            for i in 0 .. children.length() {
-                let child = children.item(i).unwrap();
-                let Some(id) = child.get_attribute(ATTR_INDENT_ID) else {
-                    break;
-                };
-                let Some(inner) = child.first_element_child() else {
-                    continue;
-                };
-                let id = usize::from_str_radix(&id, 10).unwrap();
-                let indent_block =
-                    document().get_element_by_id(&css_id_block(id)).unwrap().dyn_into::<Element>().unwrap();
-                let width = inner.get_bounding_client_rect().width() as f32;
-                let set_width =
-                    window()
-                        .get_computed_style(&indent_block)
-                        .unwrap()
-                        .unwrap()
-                        .get_property_value("padding-left")
-                        .unwrap()
-                        .strip_suffix("px")
-                        .unwrap()
-                        .parse::<f32>()
-                        .unwrap();
-                if width > set_width {
-                    set_indent(&root, indent_block, &get_aligned(id), width, true);
-                } else {
-                    let style = child.dyn_ref::<HtmlElement>().unwrap().style();
-                    let left = calculate_indent_alignment(&indent_block, &child, &style);
-                    if (left.have - left.want).abs() > 0.5 {
-                        style.set_property("left", &format!("{}px", left.want)).unwrap();
+        Timeout::new(0, {
+            let root = root.clone();
+            let line = line.clone();
+            move || {
+                let children = line.dyn_ref::<Element>().unwrap().children();
+                for i in 0 .. children.length() {
+                    let child = children.item(i).unwrap();
+                    let Some(id) = child.get_attribute(ATTR_INDENT_ID) else {
+                        break;
+                    };
+                    let Some(inner) = child.first_element_child() else {
+                        continue;
+                    };
+                    let id = usize::from_str_radix(&id, 10).unwrap();
+                    let indent_block =
+                        root
+                            .get_elements_by_class_name(&css_class_block(id))
+                            .item(0)
+                            .unwrap()
+                            .dyn_into::<Element>()
+                            .unwrap();
+                    let width = inner.get_bounding_client_rect().width() as f32;
+                    let set_width =
+                        window()
+                            .get_computed_style(&indent_block)
+                            .unwrap()
+                            .unwrap()
+                            .get_property_value("padding-left")
+                            .unwrap()
+                            .strip_suffix("px")
+                            .unwrap()
+                            .parse::<f32>()
+                            .unwrap();
+                    if width > set_width {
+                        set_indent(&root, indent_block, &get_aligned(&root, id), width, true);
+                    } else {
+                        let style = child.dyn_ref::<HtmlElement>().unwrap().style();
+                        let left = calculate_indent_alignment(&indent_block, &child, &style);
+                        if (left.have - left.want).abs() > 0.5 {
+                            style.set_property("left", &format!("{}px", left.want)).unwrap();
+                        }
                     }
                 }
             }
-        }
+        }).forget();
 
         // Continue until nothing changes
         if !changed {
@@ -987,145 +1003,33 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
 }
 
 #[wasm_bindgen]
-pub fn build(initial: Vec<Block>) -> Element {
+pub fn build(initial: String) -> Element {
     let ids = Rc::new(RefCell::new(0usize));
 
     // Create initial tree
     let root = document().create_element("div").unwrap();
     root.class_list().add_2(NAMESPACE, CLASS_ROOT).unwrap();
     root.set_attribute("contenteditable", "true").unwrap();
-    {
-        struct GenerateContext {
-            ids: Rc<RefCell<usize>>,
-            indents: Vec<LineIndent>,
-        }
-
-        fn recursive_generate_block(ctx: &mut GenerateContext, parent_container: &mut Vec<Element>, block: Block) {
-            match block {
-                Block::Heading(level, block) => {
-                    parent_container.push(
-                        generate_shadow_dom(
-                            &Cell::new(0usize),
-                            generate_line_shadowdom(LineType::Heading(level), &mut ctx.indents, block),
-                        )
-                            .dyn_into()
-                            .unwrap(),
-                    );
-                },
-                Block::Line(block) => {
-                    parent_container.push(
-                        generate_shadow_dom(
-                            &Cell::new(0usize),
-                            generate_line_shadowdom(LineType::Normal, &mut ctx.indents, block),
-                        )
-                            .dyn_into()
-                            .unwrap(),
-                    );
-                },
-                Block::Code(block) => {
-                    let (_, e_block) =
-                        generate_el_block_indent(&mut ctx.ids.borrow_mut(), BlockType::BlockCode, CLASS_BLOCKCODE);
-                    let mut children = vec![];
-                    let block_len = block.len();
-                    for (i, child) in block.into_iter().enumerate() {
-                        children.push(
-                            generate_shadow_dom(
-                                &Cell::new(0usize),
-                                generate_line_code_shadowdom(&mut ctx.indents, child, if i == 0 {
-                                    Some(BlockcodeDelim::Begin)
-                                } else if i + 1 == block_len {
-                                    Some(BlockcodeDelim::End)
-                                } else {
-                                    None
-                                }),
-                            ),
-                        );
-                    }
-                    e_block.append_with_node(&children.into_iter().map(|e| JsValue::from(e)).collect()).unwrap();
-                    parent_container.push(e_block);
-                },
-                Block::Quote(block) => {
-                    let (id, e_block) =
-                        generate_el_block_indent(&mut ctx.ids.borrow_mut(), BlockType::BlockQuote, CLASS_BLOCKQUOTE);
-                    ctx.indents.push(LineIndent {
-                        source_indent: id,
-                        type_: BlockType::BlockQuote,
-                        first_text: None,
-                        text: "> ".to_string(),
-                    });
-                    let mut children = vec![];
-                    for child in block {
-                        recursive_generate_block(ctx, &mut children, child);
-                    }
-                    e_block.append_with_node(&children.into_iter().map(|e| JsValue::from(e)).collect()).unwrap();
-                    ctx.indents.pop();
-                    parent_container.push(e_block);
-                },
-                Block::Ul(block) => {
-                    let (id, e_block) =
-                        generate_el_block_indent(&mut ctx.ids.borrow_mut(), BlockType::Ul, CLASS_UL);
-                    let mut children = vec![];
-                    for bullet in block {
-                        ctx.indents.push(LineIndent {
-                            source_indent: id,
-                            type_: BlockType::Ul,
-                            first_text: Some("* ".to_string()),
-                            text: "  ".to_string(),
-                        });
-                        for child in bullet {
-                            recursive_generate_block(ctx, &mut children, child);
-                        }
-                        ctx.indents.pop();
-                    }
-                    e_block.append_with_node(&children.into_iter().map(|e| JsValue::from(e)).collect()).unwrap();
-                    parent_container.push(e_block);
-                },
-                Block::Ol(block) => {
-                    let (id, e_block) =
-                        generate_el_block_indent(&mut ctx.ids.borrow_mut(), BlockType::Ol, CLASS_OL);
-                    let mut children = vec![];
-                    for (i, bullet) in block.into_iter().enumerate() {
-                        ctx.indents.push(LineIndent {
-                            source_indent: id,
-                            type_: BlockType::Ol,
-                            first_text: Some(format!("{}. ", i)),
-                            text: "   ".to_string(),
-                        });
-                        for child in bullet {
-                            recursive_generate_block(ctx, &mut children, child);
-                        }
-                        ctx.indents.pop();
-                    }
-                    e_block.append_with_node(&children.into_iter().map(|e| JsValue::from(e)).collect()).unwrap();
-                    parent_container.push(e_block);
-                },
-            }
-        }
-
-        let mut root_children = vec![];
-        let mut ctx = GenerateContext {
-            ids: ids.clone(),
-            indents: vec![],
-        };
-        for block in initial {
-            recursive_generate_block(&mut ctx, &mut root_children, block);
-        }
-        for child in root_children {
-            root.append_child(&child).unwrap();
-        }
-        Timeout::new(0, {
-            let root = root.clone();
-            move || {
-                let indent_blocks = document().get_elements_by_class_name(CLASS_BLOCK);
-                for i in 0 .. indent_blocks.length() {
-                    let indent_block = indent_blocks.item(i).unwrap();
-                    let id = usize::from_str_radix(&indent_block.get_attribute(ATTR_ID).unwrap(), 10).unwrap();
-                    let aligned = get_aligned(id);
-                    let max_width = get_aligned_max_width(&aligned);
-                    set_indent(&root, indent_block, &aligned, max_width, false);
-                }
-            }
-        }).forget();
+    let mut initial_lines = vec![];
+    for line_text in initial.lines() {
+        let line = document().create_element("span").unwrap();
+        root.append_child(&line).unwrap();
+        let line =
+            sync_shadow_dom(
+                &mut Default::default(),
+                &mut Default::default(),
+                &line,
+                ShadowDom::Element(ShadowDomElement {
+                    tag: "p",
+                    classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
+                    attrs: Default::default(),
+                    children: vec![ShadowDom::Text(line_text.to_string())],
+                }),
+            );
+        initial_lines.push(line);
+    }
+    for line in initial_lines {
+        update_lines_starting_at(&mut UpdateLinesStartingAtCtx { ids: ids.clone() }, line);
     }
 
     // Setup change handler
@@ -1463,7 +1367,7 @@ pub fn build(initial: Vec<Block>) -> Element {
 
 pub fn get_text_lines(root: &Element) -> Vec<String> {
     let mut out = vec![];
-    let mut line = line_scan(root, ScanDirection::Forward, ScanInclusivity::Exclusive);
+    let mut line = root.get_elements_by_class_name(CLASS_LINE).item(0).map(|x| x.dyn_into::<Node>().unwrap());
     while let Some(line1) = line {
         let mut line_text = String::new();
         recurse_get_text(&line1, &mut Default::default(), &mut line_text, &mut Default::default());
@@ -1479,18 +1383,7 @@ pub fn get_text(root: &Element) -> String {
 }
 
 #[wasm_bindgen]
-pub fn get_structured(root: &Element) -> Vec<Block> {
-    let mut out = vec![];
-    for line in get_text_lines(root) {
-        out.push(Block::Code(()))
-    }
-    let text = get_text(root);
+pub fn set_text(root: &Element, text: &str) {
+    root.set_inner_html("");
+    root.set_text_content(Some(text));
 }
-
-#[wasm_bindgen]
-pub fn set_structured(root: &Element, data: Vec<Block>) { }
-
-#[wasm_bindgen]
-pub fn parse_text(text: String) -> Vec<Block> { }
-
-pub fn format_structured(structured: Vec<Block>) -> String { }
