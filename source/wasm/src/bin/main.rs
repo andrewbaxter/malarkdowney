@@ -10,7 +10,7 @@ use {
 
 fn main() {
     console_error_panic_hook::set_once();
-    let m = malarkdowney::build(include_str!("../main.md").to_string());
+    let m = malarkdowney::build(include_str!("../main.md"));
     let body = document().body().unwrap();
     body.append_child(&m).unwrap();
     body.append_child(&{

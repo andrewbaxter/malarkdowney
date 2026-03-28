@@ -31,12 +31,15 @@ web-sys = { version = "0.3", features = [
 ] }
 const_format = "0.2"
 flowcontrol = "0.2"
-serde_json = "1"
-serde = { version = "1", features = ["derive"] }
 regex = { version = "1", default-features = false }
 structre = "0.1"
-serde-wasm-bindgen = "0.6.5"
-tsify = { version = "0.5.6", features = ["js"] }
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# https://github.com/wasm-bindgen/wasm-pack/issues/1501
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
 
 [profile.release]
 opt-level = "z"

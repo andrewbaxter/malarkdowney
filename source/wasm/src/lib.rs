@@ -21,10 +21,6 @@ use {
     },
     js_sys::Array,
     linemarkdown::Inline,
-    serde::{
-        Deserialize,
-        Serialize,
-    },
     shadowdom::{
         ShadowDom,
         ShadowDomElement,
@@ -44,7 +40,6 @@ use {
         str::FromStr,
     },
     structre::structre,
-    tsify::Tsify,
     wasm_bindgen::{
         JsCast,
         JsValue,
@@ -85,19 +80,51 @@ const CLASS_BLOCKQUOTE: &str = formatcp!("{}_block_quote", NAMESPACE);
 const CLASS_UL: &str = formatcp!("{}_block_ul", NAMESPACE);
 const CLASS_OL: &str = formatcp!("{}_block_ol", NAMESPACE);
 const CLASS_PSEUDO_A: &str = formatcp!("{}_inline_pseudo_a", NAMESPACE);
+const CLASS_EMPTY: &str = formatcp!("{}_empty", NAMESPACE);
 const PREFIX_UL_FIRST: &str = "* ";
 const PREFIX_UL_FIRST2: &str = "- ";
 const PREFIX_UL: &str = "   ";
 const PREFIX_BLOCKQUOTE: &str = "> ";
 const PREFIX_BLOCKCODE: &str = "```";
 
-#[derive(Serialize, Deserialize, Clone, Copy)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Clone, Copy)]
 enum BlockType {
-    BlockQuote,
+    Quote,
     Ul,
     Ol,
-    BlockCode,
+    Code,
+}
+
+const BLOCK_TYPE_QUOTE: &str = "quote";
+const BLOCK_TYPE_UL: &str = "ul";
+const BLOCK_TYPE_OL: &str = "ol";
+const BLOCK_TYPE_CODE: &str = "code";
+
+impl BlockType {
+    fn to_str(&self) -> &'static str {
+        return match self {
+            BlockType::Quote => BLOCK_TYPE_QUOTE,
+            BlockType::Ul => BLOCK_TYPE_UL,
+            BlockType::Ol => BLOCK_TYPE_OL,
+            BlockType::Code => BLOCK_TYPE_CODE,
+        }
+    }
+}
+
+impl FromStr for BlockType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        return Ok(match s {
+            BLOCK_TYPE_QUOTE => BlockType::Quote,
+            BLOCK_TYPE_CODE => BlockType::Code,
+            BLOCK_TYPE_UL => BlockType::Ul,
+            BLOCK_TYPE_OL => BlockType::Ol,
+            _ => {
+                return Err(format!("Unknown block type [{}]", s));
+            },
+        });
+    }
 }
 
 enum LineType {
@@ -113,9 +140,6 @@ fn css_class_block(id: usize) -> String {
     return format!("{}_indent_{}", NAMESPACE, id);
 }
 
-#[derive(Serialize, Deserialize, Clone, Tsify)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-#[tsify(into_wasm_abi, from_wasm_abi)]
 pub enum Block {
     // Level starts from 1
     Heading(usize, Vec<Inline>),
@@ -337,6 +361,12 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
         }
     }
 
+    let mut classes = HashSet::new();
+    classes.insert(CLASS_NAMESPACE.to_string());
+    classes.insert(CLASS_LINE.to_string());
+    if matches!(line_type, LineType::Normal) && inlines.is_empty() {
+        classes.insert(CLASS_EMPTY.to_string());
+    }
     for inline in inlines {
         want_children.push(generate_inline(inline));
     }
@@ -353,7 +383,7 @@ fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inli
                 _ => unreachable!(),
             },
         },
-        classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
+        classes: classes,
         attrs: Default::default(),
         children: want_children,
     });
@@ -489,7 +519,7 @@ fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str)
     *ids += 1;
     e.class_list().add_3(CLASS_BLOCK, type_class, &css_class_block(id)).unwrap();
     e.set_attribute(ATTR_ID, &id.to_string()).unwrap();
-    e.set_attribute(ATTR_BLOCK_TYPE, &serde_json::to_string(&type_).unwrap()).unwrap();
+    e.set_attribute(ATTR_BLOCK_TYPE, type_.to_str()).unwrap();
     return (id, e);
 }
 
@@ -599,9 +629,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             while at_parent != root {
                 let id = at_parent.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
                 root_context_path.push((at_parent.clone(), next_child, LineIndent {
-                    type_: serde_json::from_str::<BlockType>(
-                        &at_parent.get_attribute(ATTR_BLOCK_TYPE).unwrap(),
-                    ).unwrap(),
+                    type_: BlockType::from_str(&at_parent.get_attribute(ATTR_BLOCK_TYPE).unwrap()).unwrap(),
                     source_indent: id,
                     first_text: None,
                     text: "".to_string(),
@@ -622,40 +650,47 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             // indents to line prefixes
             for (parent, parent_next, mut indent) in root_context_path {
                 match &mut indent.type_ {
-                    BlockType::BlockQuote => {
-                        let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) else {
+                    BlockType::Quote => {
+                        text = if text.is_empty() {
+                            text
+                        } else if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
+                            suffix1.to_string()
+                        } else {
                             break;
                         };
-                        text = suffix1.to_string();
                         indent.text = PREFIX_BLOCKQUOTE.to_string();
                     },
                     BlockType::Ul => {
-                        if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
-                            text = suffix1.to_string();
+                        text = if text.is_empty() {
+                            text
+                        } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
                             indent.first_text = Some(PREFIX_UL_FIRST.to_string());
                             indent.text = PREFIX_UL.to_string();
+                            suffix1.to_string()
                         } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST2) {
-                            text = suffix1.to_string();
                             indent.first_text = Some(PREFIX_UL_FIRST2.to_string());
                             indent.text = PREFIX_UL.to_string();
+                            suffix1.to_string()
                         } else if let Some(suffix1) = text.strip_prefix(&indent.text) {
-                            text = suffix1.to_string();
+                            suffix1.to_string()
                         } else {
                             break;
-                        }
+                        };
                     },
                     BlockType::Ol => {
-                        if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
-                            text = parsed.suffix;
+                        text = if text.is_empty() {
+                            text
+                        } else if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
                             indent.text = " ".repeat(parsed.number.len());
                             indent.first_text = Some(parsed.number);
+                            parsed.suffix
                         } else if let Some(suffix1) = text.strip_prefix(&indent.text) {
-                            text = suffix1.to_string();
+                            suffix1.to_string()
                         } else {
                             break;
-                        }
+                        };
                     },
-                    BlockType::BlockCode => {
+                    BlockType::Code => {
                         let mut context_codeblock_end = false;
                         shed!{
                             let Some(context_line) = context_line.dyn_ref::<Element>() else {
@@ -701,9 +736,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 }
                 let id = at_parent.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
                 context_line_path.push((at_parent.clone(), next_child, LineIndent {
-                    type_: serde_json::from_str::<BlockType>(
-                        &at_parent.get_attribute(ATTR_BLOCK_TYPE).unwrap(),
-                    ).unwrap(),
+                    type_: BlockType::from_str(&at_parent.get_attribute(ATTR_BLOCK_TYPE).unwrap(),).unwrap(),
                     source_indent: id,
                     first_text: None,
                     text: "".to_string(),
@@ -744,7 +777,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             // Move placement parent down current line's tree by matching prefixes
             for (parent, parent_next, mut indent) in context_line_path {
                 match &mut indent.type_ {
-                    BlockType::BlockQuote => {
+                    BlockType::Quote => {
                         let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) else {
                             break;
                         };
@@ -773,7 +806,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                             break;
                         }
                     },
-                    BlockType::BlockCode => {
+                    BlockType::Code => {
                         if text.starts_with(PREFIX_BLOCKCODE) {
                             // This must be the first line, otherwise it would be part of the context block
                             in_blockcode = true;
@@ -794,12 +827,12 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         loop {
             if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
                 text = suffix1.to_string();
-                let type_ = BlockType::BlockQuote;
+                let type_ = BlockType::Quote;
                 let (parent_id, parent) =
                     generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKQUOTE);
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
-                    type_: BlockType::BlockQuote,
+                    type_: BlockType::Quote,
                     first_text: None,
                     text: PREFIX_BLOCKQUOTE.to_string(),
                 }));
@@ -840,7 +873,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                     blockcode_delim = Some(BlockcodeDelim::Begin);
                 }
                 if !in_blockcode {
-                    let type_ = BlockType::BlockCode;
+                    let type_ = BlockType::Code;
                     let (parent_id, parent) =
                         generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKCODE);
                     create_parents.push((parent, LineIndent {
@@ -1002,16 +1035,21 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
     }
 }
 
-#[wasm_bindgen]
-pub fn build(initial: String) -> Element {
-    let ids = Rc::new(RefCell::new(0usize));
-
-    // Create initial tree
-    let root = document().create_element("div").unwrap();
-    root.class_list().add_2(NAMESPACE, CLASS_ROOT).unwrap();
-    root.set_attribute("contenteditable", "true").unwrap();
+fn set_text_internal(root: &Element, initial: &str) -> Vec<Node> {
     let mut initial_lines = vec![];
+    let mut first_blank = false;
     for line_text in initial.lines() {
+        // Html when copying p and maybe other elements generates synthetic extra
+        // newlines, so in order to (mostly) round trip we need to remove those newlines
+        // on the reverse side.
+        if line_text.is_empty() {
+            if first_blank {
+                first_blank = false;
+                continue;
+            }
+        } else {
+            first_blank = true;
+        }
         let line = document().create_element("span").unwrap();
         root.append_child(&line).unwrap();
         let line =
@@ -1028,7 +1066,18 @@ pub fn build(initial: String) -> Element {
             );
         initial_lines.push(line);
     }
-    for line in initial_lines {
+    return initial_lines;
+}
+
+#[wasm_bindgen]
+pub fn build(initial: &str) -> Element {
+    let ids = Rc::new(RefCell::new(0usize));
+
+    // Create initial tree
+    let root = document().create_element("div").unwrap();
+    root.class_list().add_2(NAMESPACE, CLASS_ROOT).unwrap();
+    root.set_attribute("contenteditable", "true").unwrap();
+    for line in set_text_internal(&root, initial) {
         update_lines_starting_at(&mut UpdateLinesStartingAtCtx { ids: ids.clone() }, line);
     }
 
@@ -1377,13 +1426,13 @@ pub fn get_text_lines(root: &Element) -> Vec<String> {
     return out;
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "getText")]
 pub fn get_text(root: &Element) -> String {
     return get_text_lines(root).join("\n");
 }
 
-#[wasm_bindgen]
+#[wasm_bindgen(js_name = "setText")]
 pub fn set_text(root: &Element, text: &str) {
     root.set_inner_html("");
-    root.set_text_content(Some(text));
+    set_text_internal(root, text);
 }
