@@ -2,6 +2,10 @@
 name = "malarkdowney"
 version = "0.1.0"
 edition = "2021"
+description = "An inline markdown editing widget"
+readme = "../../readme.md"
+repository = "https://github.com/andrewbaxter/malarkdowney"
+license = "ISC"
 
 [dependencies]
 console_error_panic_hook = "0.1"
