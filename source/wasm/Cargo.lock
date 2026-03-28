@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "malarkdowney"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "console_error_panic_hook",
  "const_format",
