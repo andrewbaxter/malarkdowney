@@ -216,7 +216,7 @@ fn parse_strike(c: &mut Cursor) -> Inline {
 }
 
 fn parse_emphasis(c: &mut Cursor) -> Inline {
-    return parse_symmetric(c, EMPHASIS_DELIM, |children, begin_delim, end_delim| Inline::Strong(InlineStrong {
+    return parse_symmetric(c, EMPHASIS_DELIM, |children, begin_delim, end_delim| Inline::Emphasis(InlineEmphasis {
         begin_delim: begin_delim,
         children: children,
         end_delim: end_delim,
