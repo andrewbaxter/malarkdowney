@@ -16,11 +16,19 @@ Features:
 
 Do `cargo add malarkdowney`
 
-- `build(markdownText: &str)` - Returns an `Element`, the editable markdown text block.
+- `build(markdown_text: &str)` - Returns an `Element`, the editable markdown text block.
 
 - `get_text(element: &Element)` - Returns the markdown text from the block.
 
-- `set_text(element: &Element, markdown_text: &str)` - Replaces the text in the block.
+- `set_text(element: &Element, markdown_text: &str)` - Replaces the text in the block (clears history).
+
+- `undo(element: &Element)`, `redo(element: &Element)` - Undo/redo the last change, returns whether there was anything to undo/redo.
+
+- `can_undo(element: &Element)`, `can_redo(element: &Element)`
+
+- `destroy(element: &Element)` - Optional, detaches the editor from the element (removes listeners, stops restyling).
+
+- `Editor::new(markdown_text: &str)` - Alternative to `build` with scoped lifetime: dropping the `Editor` calls `destroy`. Use `editor.root()` to get the element.
 
 # Typescript usage
 
@@ -42,9 +50,23 @@ The functions are the same as specified in rust usage, but camel case:
 
 - `setText(element: Element, markdownText: string)`
 
+- `undo(element: Element)`, `redo(element: Element)`, `canUndo(element: Element)`, `canRedo(element: Element)`
+
+- `destroy(element: Element)`
+
+# Undo/redo
+
+The editor has its own undo history (the browser's doesn't work since lines are re-rendered). Changes are grouped into steps by pauses in typing; pastes and cuts are separate steps.
+
+Ctrl/Cmd+Z, Ctrl/Cmd+Shift+Z, Ctrl+Y and the browser's undo/redo menu items are handled automatically. To integrate with an external editor or app-level undo:
+
+- Call `undo`/`redo` (and `canUndo`/`canRedo` to update buttons). The editor element dispatches a `malarkdowney-history` event whenever the history changes.
+
+- To handle the shortcuts yourself instead, listen for `keydown`/`beforeinput` in the capture phase on an ancestor of the editor and call `preventDefault()` - the editor ignores events that were already handled.
+
 # Caveats
 
-- Slack/github style markdown
+- Slack style inline markdown: `*bold*`, `_italic_`, `~strikethrough~`.
 
 - Not all markdown elements are implemented currently
 
