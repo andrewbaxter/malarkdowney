@@ -16,19 +16,17 @@ Features:
 
 Do `cargo add malarkdowney`
 
-- `build(markdown_text: &str)` - Returns an `Element`, the editable markdown text block.
+- `build(markdown_text: &str) -> (rootin::El, Editor)` - Returns a [rooting](https://github.com/andrewbaxter/rooting) `El`, the editable markdown text block, and an `Editor` handle.
 
-- `get_text(element: &Element)` - Returns the markdown text from the block.
+`Editor` methods:
 
-- `set_text(element: &Element, markdown_text: &str)` - Replaces the text in the block (clears history).
+- `get_text()` - Returns the markdown text from the block.
 
-- `undo(element: &Element)`, `redo(element: &Element)` - Undo/redo the last change, returns whether there was anything to undo/redo.
+- `set_text(markdown_text: &str)` - Replaces the text in the block (clears history).
 
-- `can_undo(element: &Element)`, `can_redo(element: &Element)`
+- `undo()`, `redo()` - Undo/redo the last change, returns whether there was anything to undo/redo.
 
-- `destroy(element: &Element)` - Optional, detaches the editor from the element (removes listeners, stops restyling).
-
-- `Editor::new(markdown_text: &str)` - Alternative to `build` with scoped lifetime: dropping the `Editor` calls `destroy`. Use `editor.root()` to get the element.
+- `can_undo()`, `can_redo()`
 
 # Typescript usage
 
@@ -42,17 +40,17 @@ Currently you can build the npm package (wasm, package.json, typescript definiti
 
 3. The package is generated in `wasm/pkg`
 
-The functions are the same as specified in rust usage, but camel case:
+In Javascript the editor is the element itself - everything is garbage collected along with it:
 
-- `build(markdownText: string)`
+- `build(markdownText: string)` - Returns an `Element`, the editable markdown text block.
 
-- `getText(element: Element)`
+- `getText(element: Element)` - Returns the markdown text from the block.
 
-- `setText(element: Element, markdownText: string)`
+- `setText(element: Element, markdownText: string)` - Replaces the text in the block (clears history).
 
-- `undo(element: Element)`, `redo(element: Element)`, `canUndo(element: Element)`, `canRedo(element: Element)`
+- `undo(element: Element)`, `redo(element: Element)` - Undo/redo the last change, returns whether there was anything to undo/redo.
 
-- `destroy(element: Element)`
+- `canUndo(element: Element)`, `canRedo(element: Element)`
 
 # Undo/redo
 
