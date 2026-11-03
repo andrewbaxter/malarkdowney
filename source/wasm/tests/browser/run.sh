@@ -13,7 +13,7 @@ site=$(mktemp -d)
 trap 'rm -rf "$site"' EXIT
 cd "$wasm_dir"
 artifact=$(
-  cargo build --target wasm32-unknown-unknown --lib --message-format=json-render-diagnostics |
+  cargo build --target wasm32-unknown-unknown --lib --features browser_tests --message-format=json-render-diagnostics |
     node -e '
       let out; require("readline").createInterface({ input: process.stdin }).on("line", (l) => {
         const m = JSON.parse(l);

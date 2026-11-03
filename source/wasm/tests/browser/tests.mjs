@@ -176,13 +176,31 @@ export default async (test, { ev, key, type, sleep }) => {
     eq(await ev("md.getText(ed)"), "ad");
   });
 
-  await test("destroy detaches: no more restyling", async () => {
-    await ev(`mk("")`);
-    await ev(`md.destroy(ed)`);
+  await test("rooted (Rust) build: works while the El is alive", async () => {
+    await ev(`(() => { document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove()); md.testRootedDropAll(); const e = md.testRootedBuild(""); document.body.appendChild(e); e.focus(); window.ed = e; })()`);
     await type("*a*");
     await sleep(DEB);
-    eq(await ev("!!ed.querySelector('strong')"), false);
-    eq(await ev("ed.__malarkdowney"), undefined);
+    eq(await ev("[!!ed.querySelector('strong'), md.getText(ed)]"), [true, "*a*"]);
+    await key("z", 2);
+    eq(await ev("md.getText(ed)"), "", "undo");
+    eq(await ev("md.canRedo(ed)"), true);
+    eq(await ev("md.redo(ed)"), true);
+    eq(await ev("[md.testRootedHandleUndo(), md.getText(ed)]"), [true, ""], "undo via the Rust Editor handle");
+  });
+
+  await test("rooted (Rust) build: dropping the El detaches everything", async () => {
+    await ev(`(() => { document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove()); md.testRootedDropAll(); const e = md.testRootedBuild("x"); document.body.appendChild(e); e.focus(); window.ed = e; })()`);
+    await sleep(DEB);
+    await ev(`md.testRootedDropAll()`);
+    eq(await ev("ed.__malarkdowney"), undefined, "state unlinked");
+    eq(await ev("[md.undo(ed), md.canUndo(ed)]"), [false, false], "ops are no-ops");
+    await ev(`caretAt(1)`);
+    await type(" *b*");
+    await key("z", 2);
+    await key("ArrowUp");
+    await sleep(DEB);
+    eq(await ev("!!ed.querySelector('strong')"), false, "no restyling");
+    eq(await ev("errors"), [], "no calls into dropped closures");
   });
 
   await test("gc: removed editors (with pending updates) are collectable", async ({ s }) => {
@@ -200,6 +218,19 @@ export default async (test, { ev, key, type, sleep }) => {
 
   const CTRL = 2, SHIFT = 8;
   const histCount = `(() => { window.histEvents = 0; ed.addEventListener("malarkdowney-history", () => window.histEvents++); })()`;
+
+  await test("gc: editor state (history etc) is freed with the element", async ({ s }) => {
+    const gc = async () => { for (let i = 0; i < 6; i++) { await s("HeapProfiler.collectGarbage"); await sleep(150); } };
+    await ev(`document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove()); window.ed = null;`);
+    await gc();
+    const before = await ev("md.testLiveEditorCount()");
+    await ev(`for (let i = 0; i < 20; i++) { const e = md.build("* item " + i); document.body.appendChild(e); e.querySelector("p").append(" *x*"); }`);
+    await sleep(DEB);
+    eq(await ev("md.testLiveEditorCount()"), before + 20, "live while attached");
+    await ev(`document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove());`);
+    await gc();
+    eq(await ev("md.testLiveEditorCount()"), before, "states freed");
+  });
 
   await test("undo/redo: keyboard shortcuts, steps split at typing pauses, caret restored", async () => {
     await ev(`mk("")`);

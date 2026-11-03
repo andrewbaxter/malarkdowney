@@ -1,8 +1,7 @@
 use {
-    gloo::utils::document,
-    malarkdowney::{
-        self,
-        get_text,
+    rooting::{
+        el,
+        set_root,
     },
     wasm_bindgen::JsValue,
     web_sys::console,
@@ -10,33 +9,22 @@ use {
 
 fn main() {
     console_error_panic_hook::set_once();
-    let m = malarkdowney::build(include_str!("../main.md"));
-    let body = document().body().unwrap();
-    body.append_child(&m).unwrap();
-    body.append_child(&{
-        let e = document().create_element("hr").unwrap();
-        e
-    }.into()).unwrap();
-    body.append_child(&{
-        let e = document().create_element("p").unwrap();
-        e.class_list().add_1("footnote").unwrap();
-        e.append_child(&{
-            let e = document().create_element("span").unwrap();
-            e.set_text_content(Some("From "));
-            e
-        }.into()).unwrap();
-        e.append_child(&{
-            let e = document().create_element("a").unwrap();
-            e.set_attribute("href", "https://github.com/andrewbaxter/malarkdowney").unwrap();
-            e.set_text_content(Some("andrewbaxter/malarkdowney"));
-            e
-        }.into()).unwrap();
-        e.append_child(&{
-            let e = document().create_element("span").unwrap();
-            e.set_text_content(Some(", with love and bountiful markdowns"));
-            e
-        }.into()).unwrap();
-        e
-    }.into()).unwrap();
-    console::log_1(&JsValue::from(format!("get_text:\n{}", get_text(&m))));
+    let (m, editor) = malarkdowney::build(include_str!("../main.md"));
+    let text = editor.get_text();
+    set_root(
+        vec![
+            m,
+            el("hr"),
+            el("p")
+                .classes(&["footnote"])
+                .push(el("span").text("From "))
+                .push(
+                    el("a")
+                        .attr("href", "https://github.com/andrewbaxter/malarkdowney")
+                        .text("andrewbaxter/malarkdowney"),
+                )
+                .push(el("span").text(", with love and bountiful markdowns")),
+        ],
+    );
+    console::log_1(&JsValue::from(format!("get_text:\n{}", text)));
 }

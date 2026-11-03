@@ -48,7 +48,11 @@ web-sys = { version = "0.3", features = [
 ] }
 flowcontrol = "0.2"
 regex = { version = "1", default-features = false }
+rooting = "0.2"
 structre = "0.1"
+
+[features]
+browser_tests = []
 
 [lib]
 crate-type = ["cdylib", "rlib"]

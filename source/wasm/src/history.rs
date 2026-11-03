@@ -1,15 +1,7 @@
-//! Undo/redo history.
-//!
-//! The editor re-renders lines itself, which breaks the browser's built in undo,
-//! so it keeps its own history: a list of snapshots of the editor lines. A step is
-//! recorded after each batch of changes (i.e. after a pause in typing, or after a
-//! paste/cut).
 use std::rc::Rc;
 
-/// Maximum number of undo steps kept
 const MAX_STEPS: usize = 200;
 
-/// A selection as (line index, UTF-16 offset in line) pairs
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct SelPos {
     pub anchor: (usize, usize),
@@ -17,16 +9,11 @@ pub struct SelPos {
 }
 
 struct Step {
-    /// Unchanged lines are shared with neighboring steps
     lines: Vec<Rc<str>>,
-    /// Selection before the change that produced this step started (where to put the
-    /// cursor when undoing it)
     sel_before: Option<SelPos>,
-    /// Selection after the change (where to put the cursor when redoing it)
     sel_after: Option<SelPos>,
 }
 
-/// What to restore the editor to after undo/redo
 pub struct Restore {
     pub lines: Vec<String>,
     pub sel: Option<SelPos>,
@@ -38,7 +25,6 @@ pub struct History {
     pending_sel_before: Option<SelPos>,
 }
 
-/// Reuse identical lines from `prev` (matching from the start and from the end)
 fn share(prev: &[Rc<str>], new: Vec<String>) -> Vec<Rc<str>> {
     let prefix = prev.iter().zip(&new).take_while(|(a, b)| ***a == **b).count();
     let max_suffix = prev.len().min(new.len()) - prefix;
@@ -69,22 +55,16 @@ impl History {
         };
     }
 
-    /// Forget all history, starting again from `lines`
     pub fn reset(&mut self, lines: Vec<String>, sel: Option<SelPos>) {
         *self = History::new(lines, sel);
     }
 
-    /// Note the selection before an edit, if this is the first edit since the last
-    /// recorded step
     pub fn begin(&mut self, sel: Option<SelPos>) {
         if self.pending_sel_before.is_none() {
             self.pending_sel_before = sel;
         }
     }
 
-    /// Record the current state as a new step, if it's different from the current
-    /// step. Returns whether a step was recorded. Discards anything that could be
-    /// redone.
     pub fn record(&mut self, lines: Vec<String>, sel: Option<SelPos>) -> bool {
         let current = &self.steps[self.at];
         if current.lines.len() == lines.len() && current.lines.iter().zip(&lines).all(|(a, b)| **a == **b) {
@@ -175,8 +155,6 @@ mod tests {
         assert!(h.undo().is_none());
         let r = h.redo().unwrap();
         assert_eq!((r.lines, r.sel), (lines(&["ab"]), sel(0, 2)));
-
-        // New edit discards redo
         assert!(h.can_redo());
         assert!(h.record(lines(&["abx"]), sel(0, 3)));
         assert!(!h.can_redo());
@@ -204,7 +182,6 @@ mod tests {
         assert!(Rc::ptr_eq(&prev[2], &next[3]));
         assert!(Rc::ptr_eq(&prev[3], &next[4]));
         assert_eq!(next.iter().map(|x| x.to_string()).collect::<Vec<_>>(), lines(&["a", "x", "y", "c", "d"]));
-        // Overlapping prefix/suffix candidates
         let next = share(&prev, lines(&["a", "a"]));
         assert_eq!(next.iter().map(|x| x.to_string()).collect::<Vec<_>>(), lines(&["a", "a"]));
     }

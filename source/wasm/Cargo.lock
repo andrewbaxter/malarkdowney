@@ -50,6 +50,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gloo-events"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68b107f8abed8105e4182de63845afcc7b69c098b7852a813ea7462a320992fc"
+dependencies = [
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "gloo-timers"
 version = "0.2.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -106,6 +116,7 @@ dependencies = [
  "gloo",
  "js-sys",
  "regex",
+ "rooting",
  "structre",
  "wasm-bindgen",
  "web-sys",
@@ -169,6 +180,19 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "rooting"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42fa2f3f73eaa3f8b8e011e4aaf9368cec0672d99454aa06cacbaede5b113da1"
+dependencies = [
+ "gloo-events",
+ "gloo-utils",
+ "js-sys",
+ "wasm-bindgen",
+ "web-sys",
+]
 
 [[package]]
 name = "rustversion"

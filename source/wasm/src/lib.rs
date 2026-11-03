@@ -16,7 +16,6 @@ use {
     },
     js_sys::{
         Array,
-        Function,
         Object,
         Reflect,
     },
@@ -25,6 +24,11 @@ use {
         SelPos,
     },
     linemarkdown::Inline,
+    rooting::{
+        defer,
+        el_from_raw,
+        El,
+    },
     shadowdom::{
         ShadowDom,
         ShadowDomElement,
@@ -39,7 +43,10 @@ use {
             HashMap,
             HashSet,
         },
-        rc::Rc,
+        rc::{
+            Rc,
+            Weak,
+        },
         str::FromStr,
     },
     structre::structre,
@@ -50,7 +57,9 @@ use {
     wasm_bindgen::{
         JsCast,
         JsValue,
-        closure::Closure,
+        closure::{
+            Closure,
+        },
         prelude::wasm_bindgen,
     },
     web_sys::{
@@ -96,6 +105,7 @@ const CLASS_BLOCK: &str = ns!("_block");
 const CLASS_LINE: &str = ns!("_line");
 const CLASS_UL: &str = ns!("_block_ul");
 const PROP_STATE: &str = "__malarkdowney";
+const ATTR_EDITOR_ID: &str = ns!("_editor_id");
 const PREFIX_UL_FIRST: &str = "* ";
 const PREFIX_UL_FIRST2: &str = "- ";
 const PREFIX_UL: &str = "   ";
@@ -1129,9 +1139,33 @@ fn queue_mutations(pending: &mut PendingState, mutations: Array) {
 }
 
 struct EditorState {
+    id: usize,
     pending: RefCell<PendingState>,
     history: RefCell<History>,
-    observer: RefCell<Option<MutationObserver>>,
+}
+
+thread_local!{
+    static EDITORS: RefCell<HashMap<usize, Weak<EditorState>>> = RefCell::new(HashMap::new());
+}
+
+impl Drop for EditorState {
+    fn drop(&mut self) {
+        let id = self.id;
+        _ = EDITORS.try_with(|e| e.borrow_mut().remove(&id));
+    }
+}
+
+fn lookup(root: &Element) -> Option<Rc<EditorState>> {
+    let id = root.get_attribute(ATTR_EDITOR_ID)?.parse::<usize>().ok()?;
+    return EDITORS.with(|e| e.borrow().get(&id).and_then(|w| w.upgrade()));
+}
+
+fn root_observer(root: &Element) -> Option<MutationObserver> {
+    let state = Reflect::get(root, &JsValue::from_str(PROP_STATE)).ok().filter(|s| !s.is_undefined())?;
+    return Reflect::get(&state, &JsValue::from_str("mutationObserver"))
+        .ok()
+        .filter(|o| !o.is_undefined())
+        .map(|o| o.unchecked_into());
 }
 
 fn process_pending(state: &EditorState) {
@@ -1160,23 +1194,6 @@ fn process_pending(state: &EditorState) {
             dispatch_history_event(&root);
         }
     }
-}
-
-fn flush_state(state: &EditorState) {
-    let records = state.observer.borrow().as_ref().map(|o| o.take_records());
-    if let Some(records) = records {
-        queue_mutations(&mut state.pending.borrow_mut(), records);
-    }
-    process_pending(state);
-}
-
-fn discard_pending(state: &EditorState) {
-    if let Some(o) = state.observer.borrow().as_ref() {
-        o.take_records();
-    }
-    let mut pending = state.pending.borrow_mut();
-    pending.timeout = None;
-    pending.lines.clear();
 }
 
 fn dispatch_history_event(root: &Element) {
@@ -1208,27 +1225,88 @@ fn sel_pos(root: &Element) -> Option<SelPos> {
     });
 }
 
-fn state_get(root: &Element, key: &str) -> Option<JsValue> {
-    let state = Reflect::get(root, &JsValue::from_str(PROP_STATE)).ok()?;
-    if state.is_undefined() {
-        return None;
+impl EditorState {
+    fn flush(&self, root: &Element) {
+        if let Some(observer) = root_observer(root) {
+            queue_mutations(&mut self.pending.borrow_mut(), observer.take_records());
+        }
+        process_pending(self);
     }
-    return Reflect::get(&state, &JsValue::from_str(key)).ok().filter(|x| !x.is_undefined());
-}
 
-fn editor_op(root: &Element, op: &str) -> bool {
-    let Some(f) = state_get(root, "op").and_then(|f| f.dyn_into::<Function>().ok()) else {
-        return false;
-    };
-    return f
-        .call2(&JsValue::UNDEFINED, &JsValue::from_str(op), root)
-        .ok()
-        .and_then(|x| x.as_bool())
-        .unwrap_or(false);
+    fn discard_pending(&self, root: &Element) {
+        if let Some(observer) = root_observer(root) {
+            observer.take_records();
+        }
+        let mut pending = self.pending.borrow_mut();
+        pending.timeout = None;
+        pending.lines.clear();
+    }
+
+    fn begin(&self, root: &Element) {
+        self.history.borrow_mut().begin(sel_pos(root));
+    }
+
+    fn undo_redo(&self, root: &Element, undo: bool) -> bool {
+        self.flush(root);
+        let restore_to = {
+            let mut history = self.history.borrow_mut();
+            if undo {
+                history.undo()
+            } else {
+                history.redo()
+            }
+        };
+        let Some(restore_to) = restore_to else {
+            return false;
+        };
+        let focused = document().active_element().as_ref().map_or(false, |e| root.contains(Some(e)));
+        load_lines(root, &restore_to.lines);
+        self.discard_pending(root);
+        if focused {
+            if let Some(sel) = restore_to.sel {
+                let lines = all_lines(root);
+                let locate =
+                    |(line, offset): (usize, usize)| lines
+                        .get(line)
+                        .map(|l| dom::locate_text_offset(l, offset));
+                if let (Some((anchor_node, anchor_offset)), Some((focus_node, focus_offset))) =
+                    (locate(sel.anchor), locate(sel.focus)) {
+                    dom::select_range(&anchor_node, anchor_offset, &focus_node, focus_offset);
+                }
+            }
+        }
+        dispatch_history_event(root);
+        return true;
+    }
+
+    fn can_undo(&self, root: &Element) -> bool {
+        self.flush(root);
+        return self.history.borrow().can_undo();
+    }
+
+    fn can_redo(&self, root: &Element) -> bool {
+        self.flush(root);
+        return self.history.borrow().can_redo();
+    }
+
+    fn get_text(&self, root: &Element) -> String {
+        self.flush(root);
+        return textformat::export_lines(&all_lines(root).iter().map(export_line).collect::<Vec<_>>());
+    }
+
+    fn set_text(&self, root: &Element, markdown_text: &str) {
+        self.flush(root);
+        load_text(root, markdown_text);
+        self.discard_pending(root);
+        self.history.borrow_mut().reset(raw_lines(root), sel_pos(root));
+        dispatch_history_event(root);
+    }
 }
 
 fn flush(root: &Element) {
-    editor_op(root, "flush");
+    if let Some(state) = lookup(root) {
+        state.flush(root);
+    }
 }
 
 fn html_document() -> Option<HtmlDocument> {
@@ -1288,7 +1366,9 @@ fn handle_copy(event: &Event, cut: bool) {
     }
     event.prevent_default();
     if cut {
-        editor_op(&root, "begin");
+        if let Some(state) = lookup(&root) {
+            state.begin(&root);
+        }
         if !html_document().and_then(|d| d.exec_command("delete").ok()).unwrap_or(false) {
             _ = sel.delete_from_document();
         }
@@ -1310,44 +1390,36 @@ fn is_line_or_root(n: &Node) -> bool {
     return false;
 }
 
-#[wasm_bindgen]
-pub fn destroy(root: &Element) {
-    if let Some(listeners) = state_get(root, "listeners") {
-        for l in Array::from(&listeners).iter() {
-            let l = Array::from(&l);
-            if let (Some(type_), Ok(f)) = (l.get(0).as_string(), l.get(1).dyn_into::<Function>()) {
-                _ = root.remove_event_listener_with_callback(&type_, &f);
-            }
-        }
-    }
-    if let Some(o) = state_get(root, "mutationObserver") {
-        o.unchecked_into::<MutationObserver>().disconnect();
-    }
-    if let Some(o) = state_get(root, "resizeObserver") {
-        o.unchecked_into::<ResizeObserver>().disconnect();
-    }
-    _ = Reflect::delete_property(root, &JsValue::from_str(PROP_STATE));
-}
-
-#[wasm_bindgen]
-pub fn build(markdown_text: &str) -> Element {
+fn create_root(markdown_text: &str) -> Element {
     // Create initial tree
     let root = document().create_element("div").unwrap();
     root.class_list().add_2(NAMESPACE, CLASS_ROOT).unwrap();
     root.set_attribute("contenteditable", "true").unwrap();
     load_text(&root, markdown_text);
+    return root;
+}
+
+fn attach(root: &Element, owner: Option<&El>) -> Rc<EditorState> {
+    let root = root.clone();
     let state = Object::new();
     let set = |k: &str, v: &JsValue| {
         _ = Reflect::set(&state, &JsValue::from_str(k), v);
     };
+    let id = NEXT_ID.with(|x| {
+        let out = x.get();
+        x.set(out + 1);
+        return out;
+    });
     let editor_state = Rc::new(EditorState {
+        id: id,
         pending: RefCell::new(PendingState {
             timeout: None,
             lines: vec![],
         }),
         history: RefCell::new(History::new(raw_lines(&root), None)),
-        observer: RefCell::new(None),
     });
+    EDITORS.with(|e| e.borrow_mut().insert(id, Rc::downgrade(&editor_state)));
+    _ = root.set_attribute(ATTR_EDITOR_ID, &id.to_string());
     let on_mutations = Closure::<dyn Fn(Array)>::new({
         let editor_state = editor_state.clone();
         move |mutations: Array| {
@@ -1361,7 +1433,15 @@ pub fn build(markdown_text: &str) -> Element {
                 move || process_pending(&editor_state)
             }));
         }
-    }).into_js_value();
+    });
+    let on_mutations = match owner {
+        Some(owner) => {
+            let js = on_mutations.as_ref().clone();
+            owner.ref_own(|_| on_mutations);
+            js
+        },
+        None => on_mutations.into_js_value(),
+    };
     let observer = MutationObserver::new(on_mutations.unchecked_ref()).unwrap();
     observer.observe_with_options(&root, &{
         let o = MutationObserverInit::new();
@@ -1371,74 +1451,16 @@ pub fn build(markdown_text: &str) -> Element {
         o
     }).unwrap();
     set("mutationObserver", &observer);
-    *editor_state.observer.borrow_mut() = Some(observer.clone());
-    set("op", &Closure::<dyn Fn(String, Element) -> bool>::new({
-        let editor_state = editor_state.clone();
-        move |op: String, root: Element| -> bool {
-            match op.as_str() {
-                "flush" => {
-                    flush_state(&editor_state);
-                    return true;
-                },
-                "begin" => {
-                    editor_state.history.borrow_mut().begin(sel_pos(&root));
-                    return true;
-                },
-                "undo" | "redo" => {
-                    flush_state(&editor_state);
-                    let restore_to = {
-                        let mut history = editor_state.history.borrow_mut();
-                        if op == "undo" {
-                            history.undo()
-                        } else {
-                            history.redo()
-                        }
-                    };
-                    let Some(restore_to) = restore_to else {
-                        return false;
-                    };
-                    let focused = document().active_element().as_ref().map_or(false, |e| root.contains(Some(e)));
-                    load_lines(&root, &restore_to.lines);
-                    discard_pending(&editor_state);
-                    if focused {
-                        if let Some(sel) = restore_to.sel {
-                            let lines = all_lines(&root);
-                            let locate =
-                                |(line, offset): (usize, usize)| lines
-                                    .get(line)
-                                    .map(|l| dom::locate_text_offset(l, offset));
-                            if let (Some((anchor_node, anchor_offset)), Some((focus_node, focus_offset))) =
-                                (locate(sel.anchor), locate(sel.focus)) {
-                                dom::select_range(&anchor_node, anchor_offset, &focus_node, focus_offset);
-                            }
-                        }
-                    }
-                    dispatch_history_event(&root);
-                    return true;
-                },
-                "canUndo" => {
-                    return editor_state.history.borrow().can_undo();
-                },
-                "canRedo" => {
-                    return editor_state.history.borrow().can_redo();
-                },
-                "reset" => {
-                    discard_pending(&editor_state);
-                    editor_state.history.borrow_mut().reset(raw_lines(&root), sel_pos(&root));
-                    dispatch_history_event(&root);
-                    return true;
-                },
-                _ => {
-                    return false;
-                },
-            }
+    let listen = |type_: &'static str, f: fn(&Event)| {
+        match owner {
+            Some(owner) => {
+                owner.ref_on(type_, move |e| f(e));
+            },
+            None => {
+                let cb = Closure::<dyn Fn(Event)>::new(move |e: Event| f(&e)).into_js_value();
+                _ = root.add_event_listener_with_callback(type_, cb.unchecked_ref());
+            },
         }
-    }).into_js_value());
-    let listeners = Array::new();
-    let listen = |type_: &str, f: fn(&Event)| {
-        let cb = Closure::<dyn Fn(Event)>::new(move |e: Event| f(&e)).into_js_value();
-        _ = root.add_event_listener_with_callback(type_, cb.unchecked_ref());
-        listeners.push(&Array::of2(&JsValue::from_str(type_), &cb));
     };
     listen("keydown", |event| {
         let Some(root) = event_root(event) else {
@@ -1451,14 +1473,16 @@ pub fn build(markdown_text: &str) -> Element {
             return;
         }
         if (event.ctrl_key() || event.meta_key()) && !event.alt_key() {
-            let op = match (event.key().to_lowercase().as_str(), event.shift_key()) {
-                ("z", false) => Some("undo"),
-                ("z", true) | ("y", false) => Some("redo"),
+            let undo = match (event.key().to_lowercase().as_str(), event.shift_key()) {
+                ("z", false) => Some(true),
+                ("z", true) | ("y", false) => Some(false),
                 _ => None,
             };
-            if let Some(op) = op {
+            if let Some(undo) = undo {
                 event.prevent_default();
-                editor_op(&root, op);
+                if let Some(state) = lookup(&root) {
+                    state.undo_redo(&root, undo);
+                }
                 return;
             }
         }
@@ -1642,8 +1666,11 @@ pub fn build(markdown_text: &str) -> Element {
         let Some(doc) = html_document() else {
             return;
         };
-        flush(&root);
-        editor_op(&root, "begin");
+        let Some(state) = lookup(&root) else {
+            return;
+        };
+        state.flush(&root);
+        state.begin(&root);
         for (i, line) in textformat::import_lines(&text).into_iter().enumerate() {
             if i > 0 {
                 _ = doc.exec_command("insertParagraph");
@@ -1652,7 +1679,7 @@ pub fn build(markdown_text: &str) -> Element {
                 _ = doc.exec_command_with_show_ui_and_value("insertText", false, &line);
             }
         }
-        flush(&root);
+        state.flush(&root);
     });
     listen("beforeinput", |event| {
         let Some(root) = event_root(event) else {
@@ -1661,11 +1688,14 @@ pub fn build(markdown_text: &str) -> Element {
         let Some(input) = event.dyn_ref::<InputEvent>() else {
             return;
         };
-        let op = match input.input_type().as_str() {
-            "historyUndo" => "undo",
-            "historyRedo" => "redo",
+        let Some(state) = lookup(&root) else {
+            return;
+        };
+        let undo = match input.input_type().as_str() {
+            "historyUndo" => true,
+            "historyRedo" => false,
             _ => {
-                editor_op(&root, "begin");
+                state.begin(&root);
                 return;
             },
         };
@@ -1673,27 +1703,62 @@ pub fn build(markdown_text: &str) -> Element {
             return;
         }
         event.prevent_default();
-        editor_op(&root, op);
+        state.undo_redo(&root, undo);
     });
-    set("listeners", &listeners);
-    let resize_observer = ResizeObserver::new(Closure::<dyn Fn(Array)>::new(|entries: Array| {
-        for entry in entries.iter() {
-            let entry = entry.unchecked_into::<ResizeObserverEntry>();
-            let root = entry.target();
-            let width = JsValue::from_f64(entry.content_rect().width());
-            let width_key = JsValue::from_str("width");
-            let Ok(state) = Reflect::get(&root, &JsValue::from_str(PROP_STATE)) else {
-                continue;
-            };
-            if Reflect::get(&state, &width_key).ok().as_ref() == Some(&width) {
-                continue;
-            }
-            _ = Reflect::set(&state, &width_key, &width);
-            _ = window().request_animation_frame(Closure::once_into_js(move || realign(&root)).unchecked_ref());
-        }
-    }).into_js_value().unchecked_ref()).unwrap();
-    resize_observer.observe(&root);
-    set("resizeObserver", &resize_observer);
+    match owner {
+        Some(owner) => {
+            owner.ref_own(|_| {
+                let last_width = Cell::new(-1.);
+                let resize_observer = rooting::ResizeObserver::new(move |entries: Array| {
+                    for entry in entries.iter() {
+                        let entry = entry.unchecked_into::<ResizeObserverEntry>();
+                        let width = entry.content_rect().width();
+                        if last_width.replace(width) == width {
+                            continue;
+                        }
+                        let root = entry.target();
+                        _ =
+                            window().request_animation_frame(
+                                Closure::once_into_js(move || realign(&root)).unchecked_ref(),
+                            );
+                    }
+                });
+                let handle = resize_observer.observe(&root);
+                return (handle, resize_observer);
+            });
+            owner.ref_own(|_| defer({
+                let root = root.clone();
+                move || {
+                    observer.disconnect();
+                    _ = root.remove_attribute(ATTR_EDITOR_ID);
+                    _ = Reflect::delete_property(&root, &JsValue::from_str(PROP_STATE));
+                }
+            }));
+        },
+        None => {
+            let resize_observer = ResizeObserver::new(Closure::<dyn Fn(Array)>::new(|entries: Array| {
+                for entry in entries.iter() {
+                    let entry = entry.unchecked_into::<ResizeObserverEntry>();
+                    let root = entry.target();
+                    let width = JsValue::from_f64(entry.content_rect().width());
+                    let width_key = JsValue::from_str("width");
+                    let Ok(state) = Reflect::get(&root, &JsValue::from_str(PROP_STATE)) else {
+                        continue;
+                    };
+                    if Reflect::get(&state, &width_key).ok().as_ref() == Some(&width) {
+                        continue;
+                    }
+                    _ = Reflect::set(&state, &width_key, &width);
+                    _ =
+                        window().request_animation_frame(
+                            Closure::once_into_js(move || realign(&root)).unchecked_ref(),
+                        );
+                }
+            }).into_js_value().unchecked_ref()).unwrap();
+            resize_observer.observe(&root);
+            set("resizeObserver", &resize_observer);
+        },
+    }
     if !FONT_LISTENER.with(|x| x.replace(true)) {
         let cb = Closure::<dyn Fn()>::new(|| {
             let roots = document().get_elements_by_class_name(CLASS_ROOT);
@@ -1707,86 +1772,127 @@ pub fn build(markdown_text: &str) -> Element {
         cb.forget();
     }
     _ = Reflect::set(&root, &JsValue::from_str(PROP_STATE), &state);
-
-    // Done
-    return root;
+    return editor_state;
 }
 
-#[wasm_bindgen(js_name = "getText")]
-pub fn get_text(root: &Element) -> String {
-    flush(root);
-    return textformat::export_lines(&all_lines(root).iter().map(export_line).collect::<Vec<_>>());
-}
-
-#[wasm_bindgen(js_name = "setText")]
-pub fn set_text(root: &Element, markdown_text: &str) {
-    flush(root);
-    load_text(root, markdown_text);
-    editor_op(root, "reset");
-}
-
-#[wasm_bindgen]
-pub fn undo(root: &Element) -> bool {
-    return editor_op(root, "undo");
-}
-
-#[wasm_bindgen]
-pub fn redo(root: &Element) -> bool {
-    return editor_op(root, "redo");
-}
-
-#[wasm_bindgen(js_name = "canUndo")]
-pub fn can_undo(root: &Element) -> bool {
-    flush(root);
-    return editor_op(root, "canUndo");
-}
-
-#[wasm_bindgen(js_name = "canRedo")]
-pub fn can_redo(root: &Element) -> bool {
-    flush(root);
-    return editor_op(root, "canRedo");
+pub fn build(markdown_text: &str) -> (El, Editor) {
+    let root = create_root(markdown_text);
+    let el = el_from_raw(root.clone());
+    let state = attach(&root, Some(&el));
+    return (el, Editor {
+        root: root,
+        state: state,
+    });
 }
 
 pub struct Editor {
     root: Element,
+    state: Rc<EditorState>,
 }
 
 impl Editor {
-    pub fn new(markdown_text: &str) -> Self {
-        return Editor { root: build(markdown_text) };
-    }
-
-    pub fn root(&self) -> &Element {
-        return &self.root;
-    }
-
     pub fn get_text(&self) -> String {
-        return get_text(&self.root);
+        return self.state.get_text(&self.root);
     }
 
     pub fn set_text(&self, markdown_text: &str) {
-        set_text(&self.root, markdown_text);
+        self.state.set_text(&self.root, markdown_text);
     }
 
     pub fn undo(&self) -> bool {
-        return undo(&self.root);
+        return self.state.undo_redo(&self.root, true);
     }
 
     pub fn redo(&self) -> bool {
-        return redo(&self.root);
+        return self.state.undo_redo(&self.root, false);
     }
 
     pub fn can_undo(&self) -> bool {
-        return can_undo(&self.root);
+        return self.state.can_undo(&self.root);
     }
 
     pub fn can_redo(&self) -> bool {
-        return can_redo(&self.root);
+        return self.state.can_redo(&self.root);
     }
 }
 
-impl Drop for Editor {
-    fn drop(&mut self) {
-        destroy(&self.root);
+#[wasm_bindgen(js_name = "build")]
+pub fn build_js(markdown_text: &str) -> Element {
+    let root = create_root(markdown_text);
+    attach(&root, None);
+    return root;
+}
+
+#[wasm_bindgen(js_name = "getText")]
+pub fn get_text_js(root: &Element) -> String {
+    return lookup(root).map(|s| s.get_text(root)).unwrap_or_default();
+}
+
+#[wasm_bindgen(js_name = "setText")]
+pub fn set_text_js(root: &Element, markdown_text: &str) {
+    if let Some(state) = lookup(root) {
+        state.set_text(root, markdown_text);
+    }
+}
+
+#[wasm_bindgen(js_name = "undo")]
+pub fn undo_js(root: &Element) -> bool {
+    return lookup(root).map_or(false, |s| s.undo_redo(root, true));
+}
+
+#[wasm_bindgen(js_name = "redo")]
+pub fn redo_js(root: &Element) -> bool {
+    return lookup(root).map_or(false, |s| s.undo_redo(root, false));
+}
+
+#[wasm_bindgen(js_name = "canUndo")]
+pub fn can_undo_js(root: &Element) -> bool {
+    return lookup(root).map_or(false, |s| s.can_undo(root));
+}
+
+#[wasm_bindgen(js_name = "canRedo")]
+pub fn can_redo_js(root: &Element) -> bool {
+    return lookup(root).map_or(false, |s| s.can_redo(root));
+}
+
+#[cfg(feature = "browser_tests")]
+mod browser_tests {
+    use {
+        super::{
+            build,
+            Editor,
+            EDITORS,
+        },
+        rooting::El,
+        std::cell::RefCell,
+        wasm_bindgen::prelude::wasm_bindgen,
+        web_sys::Element,
+    };
+
+    thread_local!{
+        static ROOTED: RefCell<Vec<(El, Editor)>> = RefCell::new(vec![]);
+    }
+
+    #[wasm_bindgen(js_name = "testRootedBuild")]
+    pub fn test_rooted_build(markdown_text: &str) -> Element {
+        let (el, editor) = build(markdown_text);
+        let raw = el.raw();
+        ROOTED.with(|r| r.borrow_mut().push((el, editor)));
+        return raw;
+    }
+
+    #[wasm_bindgen(js_name = "testRootedHandleUndo")]
+    pub fn test_rooted_handle_undo() -> bool {
+        return ROOTED.with(|r| r.borrow().last().map_or(false, |(_, editor)| editor.undo()));
+    }
+
+    #[wasm_bindgen(js_name = "testRootedDropAll")]
+    pub fn test_rooted_drop_all() {
+        ROOTED.with(|r| r.borrow_mut().clear());
+    }
+
+    #[wasm_bindgen(js_name = "testLiveEditorCount")]
+    pub fn test_live_editor_count() -> usize {
+        return EDITORS.with(|e| e.borrow().values().filter(|w| w.upgrade().is_some()).count());
     }
 }
