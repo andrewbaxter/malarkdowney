@@ -1,5 +1,4 @@
 use {
-    const_format::formatcp,
     dom::{
         ScanDirection,
         ScanInclusivity,
@@ -9,17 +8,22 @@ use {
         superif,
     },
     gloo::{
-        events::{
-            EventListener,
-            EventListenerOptions,
-        },
         timers::callback::Timeout,
         utils::{
             document,
             window,
         },
     },
-    js_sys::Array,
+    js_sys::{
+        Array,
+        Function,
+        Object,
+        Reflect,
+    },
+    history::{
+        History,
+        SelPos,
+    },
     linemarkdown::Inline,
     shadowdom::{
         ShadowDom,
@@ -27,7 +31,6 @@ use {
         sync_shadow_dom,
     },
     std::{
-        borrow::Cow,
         cell::{
             Cell,
             RefCell,
@@ -40,6 +43,10 @@ use {
         str::FromStr,
     },
     structre::structre,
+    textformat::{
+        ExportBlock,
+        ExportLine,
+    },
     wasm_bindgen::{
         JsCast,
         JsValue,
@@ -47,40 +54,48 @@ use {
         prelude::wasm_bindgen,
     },
     web_sys::{
-        CharacterData,
-        CssStyleDeclaration,
+        ClipboardEvent,
         Element,
+        Event,
+        HtmlDocument,
         HtmlElement,
+        InputEvent,
         KeyboardEvent,
         MutationObserver,
         MutationObserverInit,
         MutationRecord,
         Node,
+        ResizeObserver,
+        ResizeObserverEntry,
     },
 };
 
 pub mod dom;
 pub mod shadowdom;
 pub mod linemarkdown;
+pub mod textformat;
+pub mod history;
 
-const NAMESPACE: &str = "malarkdowney";
-const ATTR_ID: &str = formatcp!("{}_id", NAMESPACE);
-const ATTR_INDENT_ID: &str = formatcp!("{}_indent_id", NAMESPACE);
-const ATTR_BLOCK_TYPE: &str = formatcp!("{}_block_type", NAMESPACE);
-const ATTR_BLOCKCODE_BEGIN: &str = formatcp!("{}_codeblock_begin", NAMESPACE);
-const ATTR_BLOCKCODE_END: &str = formatcp!("{}_codeblock_end", NAMESPACE);
+macro_rules! ns{
+    ($suffix: literal) => {
+        concat!("malarkdowney", $suffix)
+    };
+}
+
+const NAMESPACE: &str = ns!("");
+const ATTR_ID: &str = ns!("_id");
+const ATTR_INDENT_ID: &str = ns!("_indent_id");
+const ATTR_BLOCK_TYPE: &str = ns!("_block_type");
+const ATTR_BLOCKCODE_BEGIN: &str = ns!("_codeblock_begin");
+const ATTR_BLOCKCODE_END: &str = ns!("_codeblock_end");
 const CLASS_NAMESPACE: &str = NAMESPACE;
-const CLASS_ROOT: &str = formatcp!("{}_root", NAMESPACE);
-const CLASS_INCOMPLETE: &str = formatcp!("{}_incomplete", NAMESPACE);
-const CLASS_ALIGNED: &str = formatcp!("{}_aligned", NAMESPACE);
-const CLASS_BLOCK: &str = formatcp!("{}_block", NAMESPACE);
-const CLASS_LINE: &str = formatcp!("{}_line", NAMESPACE);
-const CLASS_BLOCKCODE: &str = formatcp!("{}_block_code", NAMESPACE);
-const CLASS_BLOCKQUOTE: &str = formatcp!("{}_block_quote", NAMESPACE);
-const CLASS_UL: &str = formatcp!("{}_block_ul", NAMESPACE);
-const CLASS_OL: &str = formatcp!("{}_block_ol", NAMESPACE);
-const CLASS_PSEUDO_A: &str = formatcp!("{}_inline_pseudo_a", NAMESPACE);
-const CLASS_EMPTY: &str = formatcp!("{}_empty", NAMESPACE);
+const CLASS_ROOT: &str = ns!("_root");
+const CLASS_INCOMPLETE: &str = ns!("_incomplete");
+const CLASS_ALIGNED: &str = ns!("_aligned");
+const CLASS_BLOCK: &str = ns!("_block");
+const CLASS_LINE: &str = ns!("_line");
+const CLASS_UL: &str = ns!("_block_ul");
+const PROP_STATE: &str = "__malarkdowney";
 const PREFIX_UL_FIRST: &str = "* ";
 const PREFIX_UL_FIRST2: &str = "- ";
 const PREFIX_UL: &str = "   ";
@@ -100,17 +115,6 @@ const BLOCK_TYPE_UL: &str = "ul";
 const BLOCK_TYPE_OL: &str = "ol";
 const BLOCK_TYPE_CODE: &str = "code";
 
-impl BlockType {
-    fn to_str(&self) -> &'static str {
-        return match self {
-            BlockType::Quote => BLOCK_TYPE_QUOTE,
-            BlockType::Ul => BLOCK_TYPE_UL,
-            BlockType::Ol => BLOCK_TYPE_OL,
-            BlockType::Code => BLOCK_TYPE_CODE,
-        }
-    }
-}
-
 impl FromStr for BlockType {
     type Err = String;
 
@@ -127,29 +131,6 @@ impl FromStr for BlockType {
     }
 }
 
-enum LineType {
-    Normal,
-    Heading(usize),
-}
-
-fn class_aligned(id: usize) -> String {
-    return format!("{}_aligned_{}", NAMESPACE, id);
-}
-
-fn css_class_block(id: usize) -> String {
-    return format!("{}_indent_{}", NAMESPACE, id);
-}
-
-pub enum Block {
-    // Level starts from 1
-    Heading(usize, Vec<Inline>),
-    Line(Vec<Inline>),
-    Quote(Vec<Block>),
-    Code(Vec<String>),
-    Ul(Vec<Vec<Block>>),
-    Ol(Vec<Vec<Block>>),
-}
-
 struct LineIndent {
     source_indent: usize,
     type_: BlockType,
@@ -161,7 +142,11 @@ fn generate_aligned(out_want_children: &mut Vec<ShadowDom>, indents: &mut [LineI
     for indent in indents {
         out_want_children.push(ShadowDom::Element(ShadowDomElement {
             tag: "span",
-            classes: [CLASS_NAMESPACE.to_string(), CLASS_ALIGNED.to_string(), class_aligned(indent.source_indent)]
+            classes: [
+                CLASS_NAMESPACE.to_string(),
+                CLASS_ALIGNED.to_string(),
+                format!("{}_aligned_{}", NAMESPACE, indent.source_indent),
+            ]
                 .into_iter()
                 .collect(),
             attrs: [(ATTR_INDENT_ID.to_string(), indent.source_indent.to_string())].into_iter().collect(),
@@ -182,292 +167,95 @@ enum BlockcodeDelim {
     End,
 }
 
-fn generate_line_code_shadowdom(
-    indents: &mut [LineIndent],
-    text: String,
-    delim: Option<BlockcodeDelim>,
-) -> ShadowDom {
-    let mut want_children = vec![];
-    generate_aligned(&mut want_children, indents);
-    want_children.push(ShadowDom::Text(text));
-    return ShadowDom::Element(ShadowDomElement {
-        tag: "codeline",
-        classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
-        attrs: {
-            let mut out = HashMap::new();
-            out.insert("spellcheck".to_string(), "false".to_string());
-            if let Some(delim) = delim {
-                match delim {
-                    BlockcodeDelim::Begin => {
-                        out.insert(ATTR_BLOCKCODE_BEGIN.to_string(), "1".to_string());
-                    },
-                    BlockcodeDelim::End => {
-                        out.insert(ATTR_BLOCKCODE_END.to_string(), "1".to_string());
-                    },
-                }
-            }
-            out
-        },
-        children: want_children,
-    });
+fn parse_px(v: &str) -> Option<f64> {
+    return v.trim().strip_suffix("px")?.parse::<f64>().ok();
 }
 
-fn generate_line_shadowdom(line_type: LineType, indents: &mut [LineIndent], inlines: Vec<Inline>) -> ShadowDom {
-    let mut want_children = vec![];
-    generate_aligned(&mut want_children, indents);
-
-    fn generate_inline(want: Inline) -> ShadowDom {
-        match want {
-            Inline::Text(want) => {
-                return ShadowDom::Text(want);
-            },
-            Inline::Strong(want) => {
-                return ShadowDom::Element(ShadowDomElement {
-                    tag: "strong",
-                    classes: {
-                        let mut out = HashSet::new();
-                        out.insert(CLASS_NAMESPACE.to_string());
-                        if want.end_delim.is_none() {
-                            out.insert(CLASS_INCOMPLETE.to_string());
-                        }
-                        out
-                    },
-                    attrs: Default::default(),
-                    children: {
-                        let mut out = vec![];
-                        out.push(ShadowDom::Text(want.begin_delim));
-                        for c in want.children {
-                            out.push(generate_inline(c));
-                        }
-                        if let Some(end_delim) = want.end_delim {
-                            out.push(ShadowDom::Text(end_delim));
-                        }
-                        out
-                    },
-                });
-            },
-            Inline::Emphasis(want) => {
-                return ShadowDom::Element(ShadowDomElement {
-                    tag: "em",
-                    classes: {
-                        let mut out = HashSet::new();
-                        out.insert(CLASS_NAMESPACE.to_string());
-                        if want.end_delim.is_none() {
-                            out.insert(CLASS_INCOMPLETE.to_string());
-                        }
-                        out
-                    },
-                    attrs: Default::default(),
-                    children: {
-                        let mut out = vec![];
-                        out.push(ShadowDom::Text(want.begin_delim));
-                        for c in want.children {
-                            out.push(generate_inline(c));
-                        }
-                        if let Some(end_delim) = want.end_delim {
-                            out.push(ShadowDom::Text(end_delim));
-                        }
-                        out
-                    },
-                });
-            },
-            Inline::Strikethrough(want) => {
-                return ShadowDom::Element(ShadowDomElement {
-                    tag: "s",
-                    classes: {
-                        let mut out = HashSet::new();
-                        out.insert(CLASS_NAMESPACE.to_string());
-                        if want.end_delim.is_none() {
-                            out.insert(CLASS_INCOMPLETE.to_string());
-                        }
-                        out
-                    },
-                    attrs: Default::default(),
-                    children: {
-                        let mut out = vec![];
-                        out.push(ShadowDom::Text(want.begin_delim));
-                        for c in want.children {
-                            out.push(generate_inline(c));
-                        }
-                        if let Some(end_delim) = want.end_delim {
-                            out.push(ShadowDom::Text(end_delim));
-                        }
-                        out
-                    },
-                });
-            },
-            Inline::Link(want) => {
-                return ShadowDom::Element(ShadowDomElement {
-                    tag: "span",
-                    classes: {
-                        let mut out = HashSet::new();
-                        out.insert(CLASS_NAMESPACE.to_string());
-                        out.insert(CLASS_PSEUDO_A.to_string());
-                        if want.incomplete {
-                            out.insert(CLASS_INCOMPLETE.to_string());
-                        }
-                        out
-                    },
-                    attrs: Default::default(),
-                    children: {
-                        let mut out = vec![];
-                        out.push(ShadowDom::Text(want.title_begin_delim));
-                        for c in want.title {
-                            out.push(generate_inline(c));
-                        }
-                        if let Some(continuation) = want.continuation {
-                            out.push(ShadowDom::Text(continuation.title_end_delim));
-                            if let Some(address) = continuation.address {
-                                out.push(ShadowDom::Element(ShadowDomElement {
-                                    tag: "a",
-                                    classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
-                                    attrs: {
-                                        let mut out = HashMap::new();
-                                        out.insert("spellcheck".to_string(), "false".to_string());
-                                        out.insert("href".to_string(), address.address.clone());
-                                        out
-                                    },
-                                    children: vec![
-                                        ShadowDom::Text(
-                                            format!("{}{}{}", address.begin_delim, address.address, address.end_delim),
-                                        )
-                                    ],
-                                }));
-                            }
-                        }
-                        out
-                    },
-                });
-            },
-            Inline::Code(want) => {
-                return ShadowDom::Element(ShadowDomElement {
-                    tag: "code",
-                    classes: {
-                        let mut out = HashSet::new();
-                        out.insert(CLASS_NAMESPACE.to_string());
-                        if want.incomplete {
-                            out.insert(CLASS_INCOMPLETE.to_string());
-                        }
-                        out
-                    },
-                    attrs: {
-                        let mut out = HashMap::new();
-                        out.insert("spellcheck".to_string(), "false".to_string());
-                        out
-                    },
-                    children: vec![ShadowDom::Text(want.text)],
-                });
-            },
-        }
+fn realign(root: &Element) {
+    if !root.is_connected() {
+        return;
     }
-
-    let mut classes = HashSet::new();
-    classes.insert(CLASS_NAMESPACE.to_string());
-    classes.insert(CLASS_LINE.to_string());
-    if matches!(line_type, LineType::Normal) && inlines.is_empty() {
-        classes.insert(CLASS_EMPTY.to_string());
-    }
-    for inline in inlines {
-        want_children.push(generate_inline(inline));
-    }
-    return ShadowDom::Element(ShadowDomElement {
-        tag: match line_type {
-            LineType::Normal => "p",
-            LineType::Heading(level) => match level {
-                1 => "h1",
-                2 => "h2",
-                3 => "h3",
-                4 => "h4",
-                5 => "h5",
-                6 => "h6",
-                _ => unreachable!(),
-            },
-        },
-        classes: classes,
-        attrs: Default::default(),
-        children: want_children,
-    });
-}
-
-fn get_aligned(root: &Element, id: usize) -> Vec<Element> {
-    let mut out = vec![];
-    let aligned = root.get_elements_by_class_name(&class_aligned(id));
-    for i in 0 .. aligned.length() {
-        out.push(aligned.item(i).unwrap().dyn_into::<Element>().unwrap());
-    }
-    return out;
-}
-
-struct CalculateIndentAlignmentRes {
-    have: f64,
-    want: f64,
-}
-
-fn calculate_indent_alignment(
-    indent_block: &Element,
-    e: &Element,
-    e_style: &CssStyleDeclaration,
-) -> CalculateIndentAlignmentRes {
-    let have_rel_left = superif!({
-        let value = e_style.get_property_value("left").unwrap();
-        let Some(value) = value.strip_suffix("px") else {
-            break 'bad;
-        };
-        let Ok(value) = f64::from_str(&value) else {
-            break 'bad;
-        };
-        value
-    } 'bad {
-        0.
-    });
-    let have_block_left = indent_block.get_bounding_client_rect().left();
-    let have_e_left = e.get_bounding_client_rect().left();
-    return CalculateIndentAlignmentRes {
-        have: have_rel_left,
-        want: have_block_left - have_e_left + have_rel_left,
-    };
-}
-
-fn set_indent(root: &Element, indent_block: Element, aligned: &Vec<Element>, width: f32, recurse: bool) {
-    let root_left = root.get_bounding_client_rect().left();
-    let indent_block = indent_block.dyn_into::<HtmlElement>().unwrap();
-
-    // Update block width
-    indent_block.style().set_property("padding-left", &format!("{}px", width)).unwrap();
-
-    // Recursively update child blocks and all line alignments
-    fn do_recurse(
-        root: &Element,
-        root_left: f64,
-        indent_block: &Element,
-        aligned: Option<&Vec<Element>>,
-        recurse: bool,
-    ) {
-        let aligned = match aligned {
-            Some(a) => Cow::Borrowed(a),
-            None => {
-                let id = indent_block.get_attribute(ATTR_ID).unwrap().parse::<usize>().unwrap();
-                Cow::Owned(get_aligned(root, id))
-            },
-        };
-        for e in aligned.as_ref() {
-            let e_style = e.dyn_ref::<HtmlElement>().unwrap().style();
-            let left = calculate_indent_alignment(indent_block, e, &e_style).want;
-            let want_prop = format!("{}px", left);
-            e_style.set_property("left", &want_prop).unwrap();
-        }
-        let children = indent_block.children();
-        for i in 0 .. children.length() {
-            let Ok(child) = children.item(i).unwrap().dyn_into::<Element>() else {
+    let mut blocks = HashMap::new();
+    {
+        let els = root.get_elements_by_class_name(CLASS_BLOCK);
+        for i in 0 .. els.length() {
+            let Some(e) = els.item(i) else {
                 continue;
             };
-            if recurse && child.class_list().contains(CLASS_BLOCK) {
-                do_recurse(root, root_left, &child, None, recurse);
-            }
+            let Some(id) = e.get_attribute(ATTR_ID).and_then(|x| x.parse::<usize>().ok()) else {
+                continue;
+            };
+            let Ok(e) = e.dyn_into::<HtmlElement>() else {
+                continue;
+            };
+            blocks.insert(id, e);
         }
     }
+    let mut aligned = vec![];
+    {
+        let els = root.get_elements_by_class_name(CLASS_ALIGNED);
+        for i in 0 .. els.length() {
+            let Some(e) = els.item(i) else {
+                continue;
+            };
+            let Some(id) = e.get_attribute(ATTR_INDENT_ID).and_then(|x| x.parse::<usize>().ok()) else {
+                continue;
+            };
+            let Ok(e) = e.dyn_into::<HtmlElement>() else {
+                continue;
+            };
+            aligned.push((id, e));
+        }
+    }
+    for b in blocks.values() {
+        _ = b.style().remove_property("padding-left");
+    }
+    let mut prefix_widths = HashMap::<usize, f64>::new();
+    for (id, e) in &aligned {
+        let width = e.first_element_child().map(|inner| inner.get_bounding_client_rect().width()).unwrap_or(0.);
+        let have = prefix_widths.entry(*id).or_insert(0.);
+        if width > *have {
+            *have = width;
+        }
+    }
+    let mut set_paddings = vec![];
+    for (id, b) in &blocks {
+        let base =
+            window()
+                .get_computed_style(b)
+                .ok()
+                .flatten()
+                .and_then(|s| s.get_property_value("padding-left").ok())
+                .and_then(|v| parse_px(&v))
+                .unwrap_or(0.);
+        let want = prefix_widths.get(id).copied().unwrap_or(0.);
+        if want > base {
+            set_paddings.push((b, want));
+        }
+    }
+    for (b, want) in set_paddings {
+        _ = b.style().set_property("padding-left", &format!("{}px", want));
+    }
+    let mut set_lefts = vec![];
+    for (id, e) in &aligned {
+        let Some(b) = blocks.get(id) else {
+            continue;
+        };
+        let style = e.style();
+        let have = style.get_property_value("left").ok().and_then(|v| parse_px(&v)).unwrap_or(0.);
+        let want = b.get_bounding_client_rect().left() - e.get_bounding_client_rect().left() + have;
+        if (have - want).abs() > 0.25 {
+            set_lefts.push((style, want));
+        }
+    }
+    for (style, want) in set_lefts {
+        _ = style.set_property("left", &format!("{}px", want));
+    }
+}
 
-    do_recurse(root, root_left, &indent_block, Some(aligned), recurse);
+thread_local!{
+    static NEXT_ID: Cell<usize> = Cell::new(0);
+    static FONT_LISTENER: Cell<bool> = Cell::new(false);
 }
 
 fn is_line(node: &Node) -> bool {
@@ -482,11 +270,11 @@ fn is_line(node: &Node) -> bool {
 }
 
 fn is_root(at: &Node) -> bool {
-    return at.dyn_ref::<Element>().unwrap().class_list().contains(CLASS_ROOT);
+    return at.dyn_ref::<Element>().map_or(true, |e| e.class_list().contains(CLASS_ROOT));
 }
 
 fn line_scan(start: &Node, direction: ScanDirection, inclusivity: ScanInclusivity) -> Option<Node> {
-    fn is_match(at: &Node) -> bool {
+    return dom::scan(start, is_root, |at| {
         if !is_line(at) {
             return false;
         }
@@ -497,9 +285,7 @@ fn line_scan(start: &Node, direction: ScanDirection, inclusivity: ScanInclusivit
             }
         }
         return true;
-    }
-
-    return dom::scan(start, is_root, is_match, direction, inclusivity);
+    }, direction, inclusivity);
 }
 
 #[structre("^(?<number>[0-9]+\\. )(?<suffix>.*)$")]
@@ -513,49 +299,49 @@ struct ReHeadingPrefix {
     level: String,
 }
 
-fn generate_el_block_indent(ids: &mut usize, type_: BlockType, type_class: &str) -> (usize, Element) {
+fn generate_el_block_indent(type_: BlockType, type_class: &str) -> (usize, Element) {
     let e = document().create_element("div").unwrap();
-    let id = *ids;
-    *ids += 1;
-    e.class_list().add_3(CLASS_BLOCK, type_class, &css_class_block(id)).unwrap();
+    let id = NEXT_ID.with(|x| {
+        let out = x.get();
+        x.set(out + 1);
+        return out;
+    });
+    e.class_list().add_3(CLASS_BLOCK, type_class, &format!("{}_indent_{}", NAMESPACE, id)).unwrap();
     e.set_attribute(ATTR_ID, &id.to_string()).unwrap();
-    e.set_attribute(ATTR_BLOCK_TYPE, type_.to_str()).unwrap();
+    e.set_attribute(ATTR_BLOCK_TYPE, match type_ {
+        BlockType::Quote => BLOCK_TYPE_QUOTE,
+        BlockType::Ul => BLOCK_TYPE_UL,
+        BlockType::Ol => BLOCK_TYPE_OL,
+        BlockType::Code => BLOCK_TYPE_CODE,
+    }).unwrap();
     return (id, e);
 }
 
-fn recurse_get_text(n: &Node, out_cursor: &mut Option<usize>, out_text: &mut String, sel: &Option<(Node, usize)>) {
-    if let Some((sel_n, sel_offset)) = sel {
-        if sel_n == n {
-            *out_cursor = Some(out_text.len() + sel_offset);
-        }
-    }
+fn recurse_get_text(n: &Node, out_text: &mut String) {
     if n.node_type() == Node::TEXT_NODE {
-        out_text.push_str(&n.node_value().unwrap());
+        out_text.push_str(&n.node_value().unwrap_or_default());
     } else if n.node_type() == Node::ELEMENT_NODE {
         let nodes = n.child_nodes();
         for i in 0 .. nodes.length() {
-            recurse_get_text(&nodes.item(i).unwrap(), out_cursor, out_text, sel);
+            if let Some(child) = nodes.item(i) {
+                recurse_get_text(&child, out_text);
+            }
         }
     }
 }
 
-struct UpdateLinesStartingAtCtx {
-    ids: Rc<RefCell<usize>>,
-}
-
-fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) {
+fn update_lines_starting_at(mut line: Node) -> Option<Element> {
     let mut context_line = line_scan(&line, ScanDirection::Backward, ScanInclusivity::Exclusive);
 
     // Locate root
     let root;
     {
         let Some(mut parent_at) = line.parent_element() else {
-            return;
+            return None;
         };
         while !parent_at.class_list().contains(CLASS_ROOT) {
             let Some(temp) = parent_at.parent_element() else {
-                // Looking at unrooted element?
-                return;
+                return None;
             };
             parent_at = temp;
         }
@@ -566,49 +352,15 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
     loop {
         let mut changed = false;
         let mut indents = vec![];
-
-        // Get text + selection
-        let sel = shed!{
-            let Some(sel) = document().get_selection().unwrap() else {
-                break None;
-            };
-            let Some(n) = sel.anchor_node() else {
-                break None;
-            };
-            if n.node_type() == Node::TEXT_NODE {
-                break Some((n, sel.anchor_offset() as usize));
-            } else if n.node_type() == Node::ELEMENT_NODE {
-                if sel.anchor_offset() == 0 {
-                    break Some((n, 0));
-                }
-
-                fn find_last_text_node(at: &Node) -> Option<Node> {
-                    let children = at.child_nodes();
-                    for i in (0 .. children.length()).rev() {
-                        let child = children.item(i).unwrap();
-                        if let Some(_) = child.dyn_ref::<CharacterData>() {
-                            return Some(child);
-                        }
-                        if let Some(found) = find_last_text_node(&child) {
-                            return Some(found);
-                        }
-                    }
-                    return None;
-                }
-
-                if let Some(child) = find_last_text_node(&n.child_nodes().item(sel.anchor_offset() - 1).unwrap()) {
-                    let text_len = child.text_content().unwrap().len();
-                    break Some((child, text_len));
-                } else {
-                    break Some((n, 0));
-                }
-            } else {
-                break None;
-            }
+        let (sel_anchor, sel_focus) = match document().get_selection() {
+            Ok(Some(sel)) => (
+                sel.anchor_node().and_then(|n| dom::text_offset_in(&line, &n, sel.anchor_offset())),
+                sel.focus_node().and_then(|n| dom::text_offset_in(&line, &n, sel.focus_offset())),
+            ),
+            _ => (None, None),
         };
         let mut text = String::new();
-        let mut cursor = None;
-        recurse_get_text(&line, &mut cursor, &mut text, &sel);
+        recurse_get_text(&line, &mut text);
 
         // Find default root
         let mut place_before = line.next_sibling();
@@ -825,11 +577,20 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         let mut create_parents = vec![];
         let mut blockcode_delim = None;
         loop {
+            if in_blockcode {
+                if text.starts_with(PREFIX_BLOCKCODE) {
+                    blockcode_delim = Some(if blockcode_is_nonfirst {
+                        BlockcodeDelim::End
+                    } else {
+                        BlockcodeDelim::Begin
+                    });
+                }
+                break;
+            }
             if let Some(suffix1) = text.strip_prefix(PREFIX_BLOCKQUOTE) {
                 text = suffix1.to_string();
                 let type_ = BlockType::Quote;
-                let (parent_id, parent) =
-                    generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKQUOTE);
+                let (parent_id, parent) = generate_el_block_indent(type_, ns!("_block_quote"));
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: BlockType::Quote,
@@ -839,7 +600,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST) {
                 text = suffix1.to_string();
                 let type_ = BlockType::Ul;
-                let (parent_id, parent) = generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_UL);
+                let (parent_id, parent) = generate_el_block_indent(type_, CLASS_UL);
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: type_,
@@ -849,7 +610,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             } else if let Some(suffix1) = text.strip_prefix(PREFIX_UL_FIRST2) {
                 text = suffix1.to_string();
                 let type_ = BlockType::Ul;
-                let (parent_id, parent) = generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_UL);
+                let (parent_id, parent) = generate_el_block_indent(type_, CLASS_UL);
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: type_,
@@ -859,7 +620,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
             } else if let Ok(parsed) = ReOlNumberPrefix::from_str(&text) {
                 text = parsed.suffix;
                 let type_ = BlockType::Ol;
-                let (parent_id, parent) = generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_OL);
+                let (parent_id, parent) = generate_el_block_indent(type_, ns!("_block_ol"));
                 create_parents.push((parent, LineIndent {
                     source_indent: parent_id,
                     type_: type_,
@@ -874,8 +635,7 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 }
                 if !in_blockcode {
                     let type_ = BlockType::Code;
-                    let (parent_id, parent) =
-                        generate_el_block_indent(&mut ctx.ids.borrow_mut(), type_, CLASS_BLOCKCODE);
+                    let (parent_id, parent) = generate_el_block_indent(type_, ns!("_block_code"));
                     create_parents.push((parent, LineIndent {
                         source_indent: parent_id,
                         type_: type_,
@@ -936,9 +696,6 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                 clean_up_until.remove();
             }
         }
-
-        // Parse text into inline and sync with line
-        let offset = Cell::new(0usize);
         let line_shadowdom = if in_blockcode {
             shed!{
                 let Some(line) = line.dyn_ref::<Element>() else {
@@ -957,71 +714,239 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
                     break;
                 }
             }
-            generate_line_code_shadowdom(&mut indents, text, blockcode_delim)
-        } else {
-            // Parse line type
-            let line_type;
-            if let Ok(parsed) = ReHeadingPrefix::from_str(&text) {
-                let heading_level = parsed.level.len();
-                line_type = LineType::Heading(heading_level);
-            } else {
-                line_type = LineType::Normal;
+            {
+                let mut want_children = vec![];
+                generate_aligned(&mut want_children, &mut indents);
+                want_children.push(ShadowDom::Text(text));
+                ShadowDom::Element(ShadowDomElement {
+                    tag: "codeline",
+                    classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
+                    attrs: {
+                        let mut out = HashMap::new();
+                        out.insert("spellcheck".to_string(), "false".to_string());
+                        if let Some(delim) = blockcode_delim {
+                            match delim {
+                                BlockcodeDelim::Begin => {
+                                    out.insert(ATTR_BLOCKCODE_BEGIN.to_string(), "1".to_string());
+                                },
+                                BlockcodeDelim::End => {
+                                    out.insert(ATTR_BLOCKCODE_END.to_string(), "1".to_string());
+                                },
+                            }
+                        }
+                        out
+                    },
+                    children: want_children,
+                })
             }
+        } else {
+            let heading_level = ReHeadingPrefix::from_str(&text).ok().map(|parsed| parsed.level.len());
 
             // Parse inline
             let inline = linemarkdown::parse(&text);
+            {
+                let mut want_children = vec![];
+                generate_aligned(&mut want_children, &mut indents);
 
-            // Generate and sync
-            generate_line_shadowdom(line_type, &mut indents, inline)
-        };
-        line = sync_shadow_dom(&mut cursor, &offset, &line, line_shadowdom);
-
-        // Update indents
-        Timeout::new(0, {
-            let root = root.clone();
-            let line = line.clone();
-            move || {
-                let children = line.dyn_ref::<Element>().unwrap().children();
-                for i in 0 .. children.length() {
-                    let child = children.item(i).unwrap();
-                    let Some(id) = child.get_attribute(ATTR_INDENT_ID) else {
-                        break;
-                    };
-                    let Some(inner) = child.first_element_child() else {
-                        continue;
-                    };
-                    let id = usize::from_str_radix(&id, 10).unwrap();
-                    let indent_block =
-                        root
-                            .get_elements_by_class_name(&css_class_block(id))
-                            .item(0)
-                            .unwrap()
-                            .dyn_into::<Element>()
-                            .unwrap();
-                    let width = inner.get_bounding_client_rect().width() as f32;
-                    let set_width =
-                        window()
-                            .get_computed_style(&indent_block)
-                            .unwrap()
-                            .unwrap()
-                            .get_property_value("padding-left")
-                            .unwrap()
-                            .strip_suffix("px")
-                            .unwrap()
-                            .parse::<f32>()
-                            .unwrap();
-                    if width > set_width {
-                        set_indent(&root, indent_block, &get_aligned(&root, id), width, true);
-                    } else {
-                        let style = child.dyn_ref::<HtmlElement>().unwrap().style();
-                        let left = calculate_indent_alignment(&indent_block, &child, &style);
-                        if (left.have - left.want).abs() > 0.5 {
-                            style.set_property("left", &format!("{}px", left.want)).unwrap();
-                        }
+                fn generate_inline(want: Inline) -> ShadowDom {
+                    match want {
+                        Inline::Text(want) => {
+                            return ShadowDom::Text(want);
+                        },
+                        Inline::Strong(want) => {
+                            return ShadowDom::Element(ShadowDomElement {
+                                tag: "strong",
+                                classes: {
+                                    let mut out = HashSet::new();
+                                    out.insert(CLASS_NAMESPACE.to_string());
+                                    if want.end_delim.is_none() {
+                                        out.insert(CLASS_INCOMPLETE.to_string());
+                                    }
+                                    out
+                                },
+                                attrs: Default::default(),
+                                children: {
+                                    let mut out = vec![];
+                                    out.push(ShadowDom::Text(want.begin_delim));
+                                    for c in want.children {
+                                        out.push(generate_inline(c));
+                                    }
+                                    if let Some(end_delim) = want.end_delim {
+                                        out.push(ShadowDom::Text(end_delim));
+                                    }
+                                    out
+                                },
+                            });
+                        },
+                        Inline::Emphasis(want) => {
+                            return ShadowDom::Element(ShadowDomElement {
+                                tag: "em",
+                                classes: {
+                                    let mut out = HashSet::new();
+                                    out.insert(CLASS_NAMESPACE.to_string());
+                                    if want.end_delim.is_none() {
+                                        out.insert(CLASS_INCOMPLETE.to_string());
+                                    }
+                                    out
+                                },
+                                attrs: Default::default(),
+                                children: {
+                                    let mut out = vec![];
+                                    out.push(ShadowDom::Text(want.begin_delim));
+                                    for c in want.children {
+                                        out.push(generate_inline(c));
+                                    }
+                                    if let Some(end_delim) = want.end_delim {
+                                        out.push(ShadowDom::Text(end_delim));
+                                    }
+                                    out
+                                },
+                            });
+                        },
+                        Inline::Strikethrough(want) => {
+                            return ShadowDom::Element(ShadowDomElement {
+                                tag: "s",
+                                classes: {
+                                    let mut out = HashSet::new();
+                                    out.insert(CLASS_NAMESPACE.to_string());
+                                    if want.end_delim.is_none() {
+                                        out.insert(CLASS_INCOMPLETE.to_string());
+                                    }
+                                    out
+                                },
+                                attrs: Default::default(),
+                                children: {
+                                    let mut out = vec![];
+                                    out.push(ShadowDom::Text(want.begin_delim));
+                                    for c in want.children {
+                                        out.push(generate_inline(c));
+                                    }
+                                    if let Some(end_delim) = want.end_delim {
+                                        out.push(ShadowDom::Text(end_delim));
+                                    }
+                                    out
+                                },
+                            });
+                        },
+                        Inline::Link(want) => {
+                            return ShadowDom::Element(ShadowDomElement {
+                                tag: "span",
+                                classes: {
+                                    let mut out = HashSet::new();
+                                    out.insert(CLASS_NAMESPACE.to_string());
+                                    out.insert(ns!("_inline_pseudo_a").to_string());
+                                    if want.incomplete {
+                                        out.insert(CLASS_INCOMPLETE.to_string());
+                                    }
+                                    out
+                                },
+                                attrs: Default::default(),
+                                children: {
+                                    let mut out = vec![];
+                                    out.push(ShadowDom::Text(want.title_begin_delim));
+                                    for c in want.title {
+                                        out.push(generate_inline(c));
+                                    }
+                                    if let Some(continuation) = want.continuation {
+                                        out.push(ShadowDom::Text(continuation.title_end_delim));
+                                        if let Some(address) = continuation.address {
+                                            out.push(ShadowDom::Element(ShadowDomElement {
+                                                tag: "a",
+                                                classes: [CLASS_NAMESPACE.to_string()].into_iter().collect(),
+                                                attrs: {
+                                                    let mut out = HashMap::new();
+                                                    out.insert("spellcheck".to_string(), "false".to_string());
+                                                    out.insert("href".to_string(), address.address.clone());
+                                                    out
+                                                },
+                                                children: vec![
+                                                    ShadowDom::Text(
+                                                        format!(
+                                                            "{}{}{}",
+                                                            address.begin_delim,
+                                                            address.address,
+                                                            address.end_delim
+                                                        ),
+                                                    ),
+                                                ],
+                                            }));
+                                        }
+                                    }
+                                    out
+                                },
+                            });
+                        },
+                        Inline::Code(want) => {
+                            return ShadowDom::Element(ShadowDomElement {
+                                tag: "code",
+                                classes: {
+                                    let mut out = HashSet::new();
+                                    out.insert(CLASS_NAMESPACE.to_string());
+                                    if want.incomplete {
+                                        out.insert(CLASS_INCOMPLETE.to_string());
+                                    }
+                                    out
+                                },
+                                attrs: {
+                                    let mut out = HashMap::new();
+                                    out.insert("spellcheck".to_string(), "false".to_string());
+                                    out
+                                },
+                                children: vec![ShadowDom::Text(want.text)],
+                            });
+                        },
                     }
                 }
+
+                let mut classes = HashSet::new();
+                classes.insert(CLASS_NAMESPACE.to_string());
+                classes.insert(CLASS_LINE.to_string());
+                if heading_level.is_none() && inline.is_empty() {
+                    classes.insert(ns!("_empty").to_string());
+                }
+                for inline in inline {
+                    want_children.push(generate_inline(inline));
+                }
+                ShadowDom::Element(ShadowDomElement {
+                    tag: match heading_level {
+                        None => "p",
+                        Some(1) => "h1",
+                        Some(2) => "h2",
+                        Some(3) => "h3",
+                        Some(4) => "h4",
+                        Some(5) => "h5",
+                        Some(6) => "h6",
+                        Some(_) => unreachable!(),
+                    },
+                    classes: classes,
+                    attrs: Default::default(),
+                    children: want_children,
+                })
             }
-        }).forget();
+        };
+        let mut dom_changed = changed;
+        line = sync_shadow_dom(&mut dom_changed, &line, line_shadowdom);
+        if dom_changed && (sel_anchor.is_some() || sel_focus.is_some()) {
+            shed!{
+                let Ok(Some(sel)) = document().get_selection() else {
+                    break;
+                };
+                let resolve = |offset: Option<usize>, node: Option<Node>, node_offset: u32| -> Option<(Node, u32)> {
+                    match offset {
+                        Some(offset) => return Some(dom::locate_text_offset(&line, offset)),
+                        None => return Some((node?, node_offset)),
+                    }
+                };
+                let Some((anchor_node, anchor_offset)) =
+                    resolve(sel_anchor, sel.anchor_node(), sel.anchor_offset()) else {
+                        break;
+                    };
+                let Some((focus_node, focus_offset)) = resolve(sel_focus, sel.focus_node(), sel.focus_offset()) else {
+                    break;
+                };
+                dom::select_range(&anchor_node, anchor_offset, &focus_node, focus_offset);
+            };
+        }
 
         // Continue until nothing changes
         if !changed {
@@ -1033,175 +958,411 @@ fn update_lines_starting_at(ctx: &mut UpdateLinesStartingAtCtx, mut line: Node) 
         context_line = Some(line);
         line = at1;
     }
+    return Some(root);
 }
 
-fn set_text_internal(root: &Element, initial: &str) -> Vec<Node> {
-    let mut initial_lines = vec![];
-    let mut first_blank = false;
-    for line_text in initial.lines() {
-        // Html when copying p and maybe other elements generates synthetic extra
-        // newlines, so in order to (mostly) round trip we need to remove those newlines
-        // on the reverse side.
-        if line_text.is_empty() {
-            if first_blank {
-                first_blank = false;
-                continue;
-            }
-        } else {
-            first_blank = true;
-        }
-        let line = document().create_element("span").unwrap();
-        root.append_child(&line).unwrap();
-        let line =
-            sync_shadow_dom(
-                &mut Default::default(),
-                &mut Default::default(),
-                &line,
-                ShadowDom::Element(ShadowDomElement {
-                    tag: "p",
-                    classes: [CLASS_NAMESPACE.to_string(), CLASS_LINE.to_string()].into_iter().collect(),
-                    attrs: Default::default(),
-                    children: vec![ShadowDom::Text(line_text.to_string())],
-                }),
-            );
-        initial_lines.push(line);
+fn load_text(root: &Element, text: &str) {
+    load_lines(root, &textformat::import_lines(text));
+}
+
+fn load_lines(root: &Element, line_texts: &[String]) {
+    root.set_inner_html("");
+    let mut lines = vec![];
+    for line_text in line_texts {
+        let line = document().create_element("p").unwrap();
+        line.class_list().add_2(CLASS_NAMESPACE, CLASS_LINE).unwrap();
+        line.set_text_content(Some(line_text));
+        _ = root.append_child(&line);
+        lines.push(line);
     }
-    return initial_lines;
+    for line in lines {
+        update_lines_starting_at(line.into());
+    }
+    realign(root);
+}
+
+fn all_lines(root: &Element) -> Vec<Node> {
+    let mut out = vec![];
+    let Some(first) = root.first_child() else {
+        return out;
+    };
+    let mut at = line_scan(&first, ScanDirection::Forward, ScanInclusivity::Inclusive);
+    while let Some(line) = at {
+        at = line_scan(&line, ScanDirection::Forward, ScanInclusivity::Exclusive);
+        out.push(line);
+    }
+    return out;
+}
+
+fn export_line(line: &Node) -> ExportLine {
+    let mut text = String::new();
+    recurse_get_text(line, &mut text);
+    let line_el = line.dyn_ref::<Element>();
+    let code = line_el.map_or(false, |e| e.tag_name().eq_ignore_ascii_case("codeline"));
+    let mut prefix_lens = HashMap::new();
+    let mut prefix_total = 0;
+    if let Some(line_el) = line_el {
+        let children = line_el.children();
+        for i in 0 .. children.length() {
+            let Some(child) = children.item(i) else {
+                continue;
+            };
+            let Some(id) = child.get_attribute(ATTR_INDENT_ID).and_then(|x| x.parse::<usize>().ok()) else {
+                continue;
+            };
+            let len = child.text_content().unwrap_or_default().chars().count();
+            prefix_lens.insert(id, len);
+            prefix_total += len;
+        }
+    }
+    let mut blocks = vec![];
+    let mut at = line.parent_element();
+    while let Some(parent) = at {
+        let classes = parent.class_list();
+        if classes.contains(CLASS_ROOT) {
+            break;
+        }
+        if classes.contains(CLASS_BLOCK) {
+            if let Some(id) = parent.get_attribute(ATTR_ID).and_then(|x| x.parse::<usize>().ok()) {
+                blocks.push(ExportBlock {
+                    id: id,
+                    quote: parent.get_attribute(ATTR_BLOCK_TYPE).as_deref() == Some(BLOCK_TYPE_QUOTE),
+                    prefix_len: prefix_lens.get(&id).copied().unwrap_or(0),
+                });
+            }
+        }
+        at = parent.parent_element();
+    }
+    blocks.reverse();
+    return ExportLine {
+        content_empty: text.chars().count() <= prefix_total,
+        text: text,
+        code: code,
+        blocks: blocks,
+    };
+}
+
+pub fn get_text_lines(root: &Element) -> Vec<String> {
+    flush(root);
+    return raw_lines(root);
+}
+
+fn raw_lines(root: &Element) -> Vec<String> {
+    return all_lines(root).iter().map(|line| {
+        let mut out = String::new();
+        recurse_get_text(line, &mut out);
+        return out;
+    }).collect();
+}
+
+struct PendingState {
+    timeout: Option<Timeout>,
+    lines: Vec<Node>,
+}
+
+fn queue_mutations(pending: &mut PendingState, mutations: Array) {
+    for m in mutations.iter() {
+        let m = MutationRecord::from(m);
+        let mut starts = vec![];
+
+        // Start from added elements
+        let added_nodes = m.added_nodes();
+        for i in 0 .. added_nodes.length() {
+            if let Some(at) = added_nodes.item(i) {
+                starts.push(at);
+            }
+        }
+
+        // Then get first element after removed elements or use the target node as the
+        // starting point
+        let following = shed!{
+            'start _;
+            if m.type_() == "childList" {
+                shed!{
+                    let previous = if added_nodes.length() == 0 {
+                        let Some(previous) = m.previous_sibling() else {
+                            break;
+                        };
+                        previous
+                    } else {
+                        let Some(last_added) = added_nodes.item(added_nodes.length() - 1) else {
+                            break;
+                        };
+                        last_added
+                    };
+                    if let Some(following) = previous.next_sibling() {
+                        break 'start Some(following);
+                    }
+                };
+            }
+            // Otherwise maybe child of a line/block
+            break 'start m.target();
+        };
+        starts.extend(following);
+        for start in starts {
+            let line = shed!{
+                'found _;
+                // Search for a line upward
+                let mut at = start.clone();
+                loop {
+                    if let Some(at_el) = at.dyn_ref::<Element>() {
+                        let classes = at_el.class_list();
+                        if classes.contains(CLASS_BLOCK) || classes.contains(CLASS_ROOT) {
+                            break;
+                        }
+                    }
+                    if is_line(&at) {
+                        break 'found Some(at);
+                    }
+                    let Some(parent) = at.parent_node() else {
+                        break;
+                    };
+                    at = parent;
+                }
+                break 'found line_scan(&start, ScanDirection::Forward, ScanInclusivity::Inclusive);
+            };
+            if let Some(line) = line {
+                pending.lines.push(line);
+            }
+        }
+    }
+}
+
+struct EditorState {
+    pending: RefCell<PendingState>,
+    history: RefCell<History>,
+    observer: RefCell<Option<MutationObserver>>,
+}
+
+fn process_pending(state: &EditorState) {
+    let lines = {
+        let mut pending = state.pending.borrow_mut();
+        pending.timeout = None;
+        std::mem::take(&mut pending.lines)
+    };
+    let seen = js_sys::Set::new(&JsValue::UNDEFINED);
+    let mut roots: Vec<Element> = vec![];
+    for line in lines {
+        if seen.has(&line) {
+            continue;
+        }
+        seen.add(&line);
+        if let Some(root) = update_lines_starting_at(line) {
+            if !roots.contains(&root) {
+                roots.push(root);
+            }
+        }
+    }
+    for root in roots {
+        realign(&root);
+        let recorded = state.history.borrow_mut().record(raw_lines(&root), sel_pos(&root));
+        if recorded {
+            dispatch_history_event(&root);
+        }
+    }
+}
+
+fn flush_state(state: &EditorState) {
+    let records = state.observer.borrow().as_ref().map(|o| o.take_records());
+    if let Some(records) = records {
+        queue_mutations(&mut state.pending.borrow_mut(), records);
+    }
+    process_pending(state);
+}
+
+fn discard_pending(state: &EditorState) {
+    if let Some(o) = state.observer.borrow().as_ref() {
+        o.take_records();
+    }
+    let mut pending = state.pending.borrow_mut();
+    pending.timeout = None;
+    pending.lines.clear();
+}
+
+fn dispatch_history_event(root: &Element) {
+    if let Ok(e) = Event::new("malarkdowney-history") {
+        _ = root.dispatch_event(&e);
+    }
+}
+
+fn sel_pos(root: &Element) -> Option<SelPos> {
+    let sel = document().get_selection().ok()??;
+    let anchor_node = sel.anchor_node()?;
+    let focus_node = sel.focus_node()?;
+    let mut anchor = None;
+    let mut focus = None;
+    for (i, line) in all_lines(root).iter().enumerate() {
+        if anchor.is_none() {
+            anchor = dom::text_offset_in(line, &anchor_node, sel.anchor_offset()).map(|o| (i, o));
+        }
+        if focus.is_none() {
+            focus = dom::text_offset_in(line, &focus_node, sel.focus_offset()).map(|o| (i, o));
+        }
+        if anchor.is_some() && focus.is_some() {
+            break;
+        }
+    }
+    return Some(SelPos {
+        anchor: anchor?,
+        focus: focus?,
+    });
+}
+
+fn state_get(root: &Element, key: &str) -> Option<JsValue> {
+    let state = Reflect::get(root, &JsValue::from_str(PROP_STATE)).ok()?;
+    if state.is_undefined() {
+        return None;
+    }
+    return Reflect::get(&state, &JsValue::from_str(key)).ok().filter(|x| !x.is_undefined());
+}
+
+fn editor_op(root: &Element, op: &str) -> bool {
+    let Some(f) = state_get(root, "op").and_then(|f| f.dyn_into::<Function>().ok()) else {
+        return false;
+    };
+    return f
+        .call2(&JsValue::UNDEFINED, &JsValue::from_str(op), root)
+        .ok()
+        .and_then(|x| x.as_bool())
+        .unwrap_or(false);
+}
+
+fn flush(root: &Element) {
+    editor_op(root, "flush");
+}
+
+fn html_document() -> Option<HtmlDocument> {
+    return document().dyn_into::<HtmlDocument>().ok();
+}
+
+fn event_root(event: &Event) -> Option<Element> {
+    return event.current_target()?.dyn_into::<Element>().ok();
+}
+
+fn handle_copy(event: &Event, cut: bool) {
+    let Some(root) = event_root(event) else {
+        return;
+    };
+    let Some(data) = event.dyn_ref::<ClipboardEvent>().and_then(|e| e.clipboard_data()) else {
+        return;
+    };
+    let Ok(Some(sel)) = document().get_selection() else {
+        return;
+    };
+    if sel.is_collapsed() || sel.range_count() == 0 {
+        return;
+    }
+    let Ok(range) = sel.get_range_at(0) else {
+        return;
+    };
+    flush(&root);
+    let mut lines = vec![];
+    for line in all_lines(&root) {
+        if !range.intersects_node(&line).unwrap_or(false) {
+            continue;
+        }
+        let mut export = export_line(&line);
+        let len = dom::utf16_len(&export.text);
+        let start =
+            range
+                .start_container()
+                .ok()
+                .and_then(|n| dom::text_offset_in(&line, &n, range.start_offset().unwrap_or(0)))
+                .unwrap_or(0);
+        let end =
+            range
+                .end_container()
+                .ok()
+                .and_then(|n| dom::text_offset_in(&line, &n, range.end_offset().unwrap_or(0)))
+                .unwrap_or(len);
+        let start_byte = dom::utf16_to_byte(&export.text, start);
+        let end_byte = dom::utf16_to_byte(&export.text, end).max(start_byte);
+        export.text = export.text[start_byte .. end_byte].to_string();
+        lines.push(export);
+    }
+    if lines.is_empty() {
+        return;
+    }
+    if data.set_data("text/plain", &textformat::export_lines(&lines)).is_err() {
+        return;
+    }
+    event.prevent_default();
+    if cut {
+        editor_op(&root, "begin");
+        if !html_document().and_then(|d| d.exec_command("delete").ok()).unwrap_or(false) {
+            _ = sel.delete_from_document();
+        }
+        flush(&root);
+    }
+}
+
+fn is_text(n: &Node) -> bool {
+    return n.node_type() == Node::TEXT_NODE;
+}
+
+fn is_line_or_root(n: &Node) -> bool {
+    if let Some(n) = n.dyn_ref::<Element>() {
+        let classes = n.class_list();
+        if classes.contains(CLASS_LINE) || classes.contains(CLASS_ROOT) {
+            return true;
+        }
+    }
+    return false;
 }
 
 #[wasm_bindgen]
-pub fn build(initial: &str) -> Element {
-    let ids = Rc::new(RefCell::new(0usize));
+pub fn destroy(root: &Element) {
+    if let Some(listeners) = state_get(root, "listeners") {
+        for l in Array::from(&listeners).iter() {
+            let l = Array::from(&l);
+            if let (Some(type_), Ok(f)) = (l.get(0).as_string(), l.get(1).dyn_into::<Function>()) {
+                _ = root.remove_event_listener_with_callback(&type_, &f);
+            }
+        }
+    }
+    if let Some(o) = state_get(root, "mutationObserver") {
+        o.unchecked_into::<MutationObserver>().disconnect();
+    }
+    if let Some(o) = state_get(root, "resizeObserver") {
+        o.unchecked_into::<ResizeObserver>().disconnect();
+    }
+    _ = Reflect::delete_property(root, &JsValue::from_str(PROP_STATE));
+}
 
+#[wasm_bindgen]
+pub fn build(markdown_text: &str) -> Element {
     // Create initial tree
     let root = document().create_element("div").unwrap();
     root.class_list().add_2(NAMESPACE, CLASS_ROOT).unwrap();
     root.set_attribute("contenteditable", "true").unwrap();
-    for line in set_text_internal(&root, initial) {
-        update_lines_starting_at(&mut UpdateLinesStartingAtCtx { ids: ids.clone() }, line);
-    }
-
-    // Setup change handler
-    let observer = MutationObserver::new(&Closure::<dyn Fn(Array) -> ()>::own({
-        struct Change {
-            line: Node,
-        }
-
-        struct DelayState {
-            delay: Option<Timeout>,
-            changes: Vec<Change>,
-        }
-
-        let delay = Rc::new(RefCell::new(DelayState {
-            delay: None,
-            changes: vec![],
-        }));
-        let ids = ids.clone();
+    load_text(&root, markdown_text);
+    let state = Object::new();
+    let set = |k: &str, v: &JsValue| {
+        _ = Reflect::set(&state, &JsValue::from_str(k), v);
+    };
+    let editor_state = Rc::new(EditorState {
+        pending: RefCell::new(PendingState {
+            timeout: None,
+            lines: vec![],
+        }),
+        history: RefCell::new(History::new(raw_lines(&root), None)),
+        observer: RefCell::new(None),
+    });
+    let on_mutations = Closure::<dyn Fn(Array)>::new({
+        let editor_state = editor_state.clone();
         move |mutations: Array| {
-            'next_mutation: for m in mutations {
-                let m = MutationRecord::from(m);
-                let mut starts = vec![];
-
-                // Start from added elements
-                let added_nodes = m.added_nodes();
-                for i in 0 .. added_nodes.length() {
-                    let Some(at) = added_nodes.item(i) else {
-                        continue;
-                    };
-                    starts.push(at);
-                }
-
-                // Then get first element after removed elements or use the target node as the
-                // starting point
-                let following = shed!{
-                    'start _;
-                    if m.type_() == "childList" {
-                        shed!{
-                            let previous = if added_nodes.length() == 0 {
-                                let Some(previous) = m.previous_sibling() else {
-                                    break;
-                                };
-                                previous
-                            } else {
-                                let Some(last_added) = added_nodes.item(added_nodes.length() - 1) else {
-                                    break;
-                                };
-                                last_added
-                            };
-                            if let Some(following) = previous.next_sibling() {
-                                break 'start following;
-                            }
-                        };
-
-                        // Otherwise maybe child of a line/block
-                        break 'start m.target().unwrap();
-                    }
-                    else {
-                        // Text within line
-                        break 'start m.target().unwrap();
-                    }
-                };
-                starts.push(following);
-
-                // For each start, check if it's a line (or get the next line otherwise that could
-                // be affected by the change)
-                let mut delay_mut = delay.borrow_mut();
-                for start in starts {
-                    let line = shed!{
-                        'found _;
-                        // Search for a line upward
-                        let mut at = start.clone();
-                        loop {
-                            if let Some(at_temp) = at.dyn_ref::<Element>() {
-                                let classes = at_temp.class_list();
-                                if classes.contains(CLASS_BLOCK) {
-                                    break;
-                                }
-                                if classes.contains(CLASS_ROOT) {
-                                    break;
-                                }
-                            }
-                            if is_line(&at) {
-                                break 'found at;
-                            }
-                            let Some(at_temp) = at.parent_node() else {
-                                break;
-                            };
-                            at = at_temp;
-                        }
-                        // Not within a line, so some child of a block? So find the next line to start from
-                        let Some(line) = line_scan(&start, ScanDirection::Forward, ScanInclusivity::Inclusive) else {
-                            continue 'next_mutation;
-                        };
-                        break 'found line;
-                    };
-                    delay_mut.changes.push(Change { line: line });
-                }
-
-                // Throttle change handling, don't cause lag while typing actively
-                delay_mut.delay = Some(Timeout::new(200, {
-                    let delay = delay.clone();
-                    let ids = ids.clone();
-                    move || {
-                        let mut delay_mut = delay.borrow_mut();
-                        delay_mut.delay = None;
-                        let changes = delay_mut.changes.split_off(0);
-                        drop(delay_mut);
-                        let seen = js_sys::Set::new(&JsValue::from(js_sys::Array::new()));
-                        let mut ctx = UpdateLinesStartingAtCtx { ids: ids };
-                        for change in changes {
-                            let el_js_value = JsValue::from(&change.line);
-                            if seen.has(&el_js_value) {
-                                continue;
-                            }
-                            seen.add(&el_js_value);
-                            update_lines_starting_at(&mut ctx, change.line);
-                        }
-                    }
-                }));
+            let mut pending = editor_state.pending.borrow_mut();
+            queue_mutations(&mut pending, mutations);
+            if pending.lines.is_empty() {
+                return;
             }
+            pending.timeout = Some(Timeout::new(200, {
+                let editor_state = editor_state.clone();
+                move || process_pending(&editor_state)
+            }));
         }
-    }).into_js_value().into()).unwrap();
+    }).into_js_value();
+    let observer = MutationObserver::new(on_mutations.unchecked_ref()).unwrap();
     observer.observe_with_options(&root, &{
         let o = MutationObserverInit::new();
         o.set_child_list(true);
@@ -1209,82 +1370,132 @@ pub fn build(initial: &str) -> Element {
         o.set_subtree(true);
         o
     }).unwrap();
-
-    // Set up contenteditable navigation issue workaround hack
-    //
-    // In contenteditable, there are cursor positions inbetween elements which makes
-    // navigation unpleasant. Deletes in these positions delete elements without
-    // touching content, then the change handler will recreate them. Up and down move
-    // to the start/end of the block element not to the previous/next line in the
-    // neighboring block elements.
-    //
-    // This intercepts keypresses at the start/end of a text node and translates them
-    // to the expected movements/changes.
-    EventListener::new_with_options(&root, "keydown", EventListenerOptions::enable_prevent_default(), |event| {
-        let event = event.dyn_ref::<KeyboardEvent>().unwrap();
-        let Some(sel) = document().get_selection().unwrap() else {
+    set("mutationObserver", &observer);
+    *editor_state.observer.borrow_mut() = Some(observer.clone());
+    set("op", &Closure::<dyn Fn(String, Element) -> bool>::new({
+        let editor_state = editor_state.clone();
+        move |op: String, root: Element| -> bool {
+            match op.as_str() {
+                "flush" => {
+                    flush_state(&editor_state);
+                    return true;
+                },
+                "begin" => {
+                    editor_state.history.borrow_mut().begin(sel_pos(&root));
+                    return true;
+                },
+                "undo" | "redo" => {
+                    flush_state(&editor_state);
+                    let restore_to = {
+                        let mut history = editor_state.history.borrow_mut();
+                        if op == "undo" {
+                            history.undo()
+                        } else {
+                            history.redo()
+                        }
+                    };
+                    let Some(restore_to) = restore_to else {
+                        return false;
+                    };
+                    let focused = document().active_element().as_ref().map_or(false, |e| root.contains(Some(e)));
+                    load_lines(&root, &restore_to.lines);
+                    discard_pending(&editor_state);
+                    if focused {
+                        if let Some(sel) = restore_to.sel {
+                            let lines = all_lines(&root);
+                            let locate =
+                                |(line, offset): (usize, usize)| lines
+                                    .get(line)
+                                    .map(|l| dom::locate_text_offset(l, offset));
+                            if let (Some((anchor_node, anchor_offset)), Some((focus_node, focus_offset))) =
+                                (locate(sel.anchor), locate(sel.focus)) {
+                                dom::select_range(&anchor_node, anchor_offset, &focus_node, focus_offset);
+                            }
+                        }
+                    }
+                    dispatch_history_event(&root);
+                    return true;
+                },
+                "canUndo" => {
+                    return editor_state.history.borrow().can_undo();
+                },
+                "canRedo" => {
+                    return editor_state.history.borrow().can_redo();
+                },
+                "reset" => {
+                    discard_pending(&editor_state);
+                    editor_state.history.borrow_mut().reset(raw_lines(&root), sel_pos(&root));
+                    dispatch_history_event(&root);
+                    return true;
+                },
+                _ => {
+                    return false;
+                },
+            }
+        }
+    }).into_js_value());
+    let listeners = Array::new();
+    let listen = |type_: &str, f: fn(&Event)| {
+        let cb = Closure::<dyn Fn(Event)>::new(move |e: Event| f(&e)).into_js_value();
+        _ = root.add_event_listener_with_callback(type_, cb.unchecked_ref());
+        listeners.push(&Array::of2(&JsValue::from_str(type_), &cb));
+    };
+    listen("keydown", |event| {
+        let Some(root) = event_root(event) else {
+            return;
+        };
+        let Some(event) = event.dyn_ref::<KeyboardEvent>() else {
+            return;
+        };
+        if event.default_prevented() {
+            return;
+        }
+        if (event.ctrl_key() || event.meta_key()) && !event.alt_key() {
+            let op = match (event.key().to_lowercase().as_str(), event.shift_key()) {
+                ("z", false) => Some("undo"),
+                ("z", true) | ("y", false) => Some("redo"),
+                _ => None,
+            };
+            if let Some(op) = op {
+                event.prevent_default();
+                editor_op(&root, op);
+                return;
+            }
+        }
+        let Ok(Some(sel)) = document().get_selection() else {
             return;
         };
         let Some(node) = sel.anchor_node() else {
             return;
         };
-        let Ok(node) = node.dyn_into() else {
-            return;
-        };
         let direction;
-
-        enum KeyDimension {
-            Vert,
-            Horiz,
-        }
-
-        let dim;
+        let vertical;
         match event.key().as_str() {
-            "ArrowLeft" => {
-                dim = KeyDimension::Horiz;
+            "ArrowLeft" | "Backspace" => {
+                vertical = false;
                 direction = ScanDirection::Backward;
             },
-            "ArrowRight" => {
-                dim = KeyDimension::Horiz;
+            "ArrowRight" | "Delete" => {
+                vertical = false;
                 direction = ScanDirection::Forward;
             },
             "ArrowUp" => {
-                dim = KeyDimension::Vert;
+                vertical = true;
                 direction = ScanDirection::Backward;
             },
             "ArrowDown" => {
-                dim = KeyDimension::Vert;
-                direction = ScanDirection::Forward;
-            },
-            "Backspace" => {
-                dim = KeyDimension::Horiz;
-                direction = ScanDirection::Backward;
-            },
-            "Delete" => {
-                dim = KeyDimension::Horiz;
+                vertical = true;
                 direction = ScanDirection::Forward;
             },
             _ => {
                 return;
             },
         }
-
-        fn is_text(n: &Node) -> bool {
-            return n.node_type() == Node::TEXT_NODE;
+        if event.shift_key() || event.alt_key() || event.ctrl_key() || event.meta_key() {
+            return;
         }
-
-        fn is_line_block_or_root(n: &Node) -> bool {
-            if let Some(n) = n.dyn_ref::<Element>() {
-                let classes = n.class_list();
-                if classes.contains(CLASS_LINE) || classes.contains(CLASS_ROOT) {
-                    return true;
-                }
-            }
-            return false;
-        }
-
-        match dim {
-            KeyDimension::Horiz => {
+        match vertical {
+            false => {
                 // This doubles up on event handling - this adjusts the starting position, then
                 // the normal handler does an additional move. This clears the (extra) gap plus
                 // the intended 1 movement.
@@ -1292,33 +1503,33 @@ pub fn build(initial: &str) -> Element {
                     return;
                 }
                 if direction == ScanDirection::Backward && sel.anchor_offset() == 0 {
-                    {
-                        // Allow backspace at root of node, rather than last character of previous line
-                        if is_line(&node) {
-                            return;
-                        }
-                        let parent = node.parent_element().unwrap();
-                        if is_line(&parent) && parent.first_child().unwrap() == node {
-                            return;
-                        }
+                    // Allow backspace at root of node, rather than last character of previous line
+                    if is_line(&node) {
+                        return;
+                    }
+                    let Some(parent) = node.parent_element() else {
+                        return;
+                    };
+                    if is_line(&parent) && parent.first_child().as_ref() == Some(&node) {
+                        return;
                     }
                     let Some(prev) =
                         dom::scan(
                             &node,
-                            is_line_block_or_root,
+                            is_line_or_root,
                             is_text,
                             ScanDirection::Backward,
                             ScanInclusivity::Exclusive,
                         ) else {
                             return;
                         };
-                    dom::select(&prev, prev.text_content().unwrap().len());
-                } else if direction == ScanDirection::Forward &&
-                    sel.anchor_offset() as usize == node.text_content().unwrap().len() {
+                    dom::select(&prev, dom::node_text_len(&prev));
+                } else if direction == ScanDirection::Forward && is_text(&node) &&
+                    sel.anchor_offset() as usize == dom::node_text_len(&node) {
                     let Some(next) =
                         dom::scan(
                             &node,
-                            is_line_block_or_root,
+                            is_line_or_root,
                             is_text,
                             ScanDirection::Forward,
                             ScanInclusivity::Exclusive,
@@ -1326,46 +1537,55 @@ pub fn build(initial: &str) -> Element {
                             return;
                         };
                     dom::select(&next, 0);
-                } else {
-                    return;
                 }
             },
-            KeyDimension::Vert => {
-                // This prevents default handling so this is the only handler; it moves to the
-                // exact desired location.
-                let current_sel_box = sel.get_range_at(0).unwrap().get_bounding_client_rect();
-
-                // Use the line instead of the current node because we care about moves between
-                // block elements and need the full line box
-                let mut node = node;
-                while !is_line(&node) {
-                    node = node.parent_node().unwrap();
+            true => {
+                let Ok(range) = sel.get_range_at(0) else {
+                    return;
+                };
+                let current_sel_box = range.get_bounding_client_rect();
+                if current_sel_box.height() <= 0. {
+                    // Multiline node, cursor not in top line
+                    return;
                 }
-                let current_node_box = dom::bounds(&node);
+                let mut line = node;
+                while !is_line(&line) {
+                    if line.dyn_ref::<Element>().map_or(false, |e| e.class_list().contains(CLASS_ROOT)) {
+                        // Multiline node, cursor not in bottom line
+                        return;
+                    }
+                    let Some(parent) = line.parent_node() else {
+                        return;
+                    };
+                    line = parent;
+                }
+                let Some(current_line_box) = dom::bounds(&line) else {
+                    return;
+                };
                 let dest_line = match direction {
                     ScanDirection::Backward => {
-                        if -(current_node_box.top() - current_sel_box.top()) / current_sel_box.height() > 0.4 {
-                            // Multiline node, cursor not in top line
+                        if -(current_line_box.top() - current_sel_box.top()) / current_sel_box.height() > 0.4 {
                             return;
                         }
-                        let Some(prev) = line_scan(&node, ScanDirection::Backward, ScanInclusivity::Exclusive) else {
+                        let Some(prev) = line_scan(&line, ScanDirection::Backward, ScanInclusivity::Exclusive) else {
                             return;
                         };
                         prev
                     },
                     ScanDirection::Forward => {
-                        if (current_node_box.bottom() - current_sel_box.bottom()) / current_sel_box.height() > 0.4 {
-                            // Multiline node, cursor not in bottom line
+                        if (current_line_box.bottom() - current_sel_box.bottom()) / current_sel_box.height() > 0.4 {
                             return;
                         }
-                        let Some(next) = line_scan(&node, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
+                        let Some(next) = line_scan(&line, ScanDirection::Forward, ScanInclusivity::Exclusive) else {
                             return;
                         };
                         next
                     },
                 };
                 let x = current_sel_box.x();
-                let dest_box = dom::bounds(&dest_line);
+                let Some(dest_box) = dom::bounds(&dest_line) else {
+                    return;
+                };
                 let y = match direction {
                     ScanDirection::Backward => dest_box.bottom() - 5.,
                     ScanDirection::Forward => dest_box.top() + 5.,
@@ -1376,14 +1596,11 @@ pub fn build(initial: &str) -> Element {
                 let Some(caret_node) = caret.offset_node() else {
                     return;
                 };
-
-                // This seems to be an offset into all text into the node... I think it's a bug,
-                // but this could work around by walking text nodes until the offset.
-                if let Some(mut caret_text_node) = dom::scan(&caret_node, is_root, is_text, direction, ScanInclusivity::Inclusive) {
+                if let Some(mut caret_text_node) =
+                    dom::scan(&caret_node, is_root, is_text, direction, ScanInclusivity::Inclusive) {
                     let mut offset = 0;
                     loop {
-                        let at_text = caret_text_node.text_content().unwrap();
-                        let len = at_text.len();
+                        let len = dom::node_text_len(&caret_text_node);
                         if offset + len >= caret.offset() as usize {
                             dom::select(&caret_text_node, caret.offset() as usize - offset);
                             event.prevent_default();
@@ -1408,31 +1625,168 @@ pub fn build(initial: &str) -> Element {
                 }
             },
         }
-    }).forget();
+    });
+    listen("copy", |e| handle_copy(e, false));
+    listen("cut", |e| handle_copy(e, true));
+    listen("paste", |event| {
+        let Some(root) = event_root(event) else {
+            return;
+        };
+        let Some(data) = event.dyn_ref::<ClipboardEvent>().and_then(|e| e.clipboard_data()) else {
+            return;
+        };
+        let Ok(text) = data.get_data("text/plain") else {
+            return;
+        };
+        event.prevent_default();
+        let Some(doc) = html_document() else {
+            return;
+        };
+        flush(&root);
+        editor_op(&root, "begin");
+        for (i, line) in textformat::import_lines(&text).into_iter().enumerate() {
+            if i > 0 {
+                _ = doc.exec_command("insertParagraph");
+            }
+            if !line.is_empty() {
+                _ = doc.exec_command_with_show_ui_and_value("insertText", false, &line);
+            }
+        }
+        flush(&root);
+    });
+    listen("beforeinput", |event| {
+        let Some(root) = event_root(event) else {
+            return;
+        };
+        let Some(input) = event.dyn_ref::<InputEvent>() else {
+            return;
+        };
+        let op = match input.input_type().as_str() {
+            "historyUndo" => "undo",
+            "historyRedo" => "redo",
+            _ => {
+                editor_op(&root, "begin");
+                return;
+            },
+        };
+        if event.default_prevented() {
+            return;
+        }
+        event.prevent_default();
+        editor_op(&root, op);
+    });
+    set("listeners", &listeners);
+    let resize_observer = ResizeObserver::new(Closure::<dyn Fn(Array)>::new(|entries: Array| {
+        for entry in entries.iter() {
+            let entry = entry.unchecked_into::<ResizeObserverEntry>();
+            let root = entry.target();
+            let width = JsValue::from_f64(entry.content_rect().width());
+            let width_key = JsValue::from_str("width");
+            let Ok(state) = Reflect::get(&root, &JsValue::from_str(PROP_STATE)) else {
+                continue;
+            };
+            if Reflect::get(&state, &width_key).ok().as_ref() == Some(&width) {
+                continue;
+            }
+            _ = Reflect::set(&state, &width_key, &width);
+            _ = window().request_animation_frame(Closure::once_into_js(move || realign(&root)).unchecked_ref());
+        }
+    }).into_js_value().unchecked_ref()).unwrap();
+    resize_observer.observe(&root);
+    set("resizeObserver", &resize_observer);
+    if !FONT_LISTENER.with(|x| x.replace(true)) {
+        let cb = Closure::<dyn Fn()>::new(|| {
+            let roots = document().get_elements_by_class_name(CLASS_ROOT);
+            for i in 0 .. roots.length() {
+                if let Some(root) = roots.item(i) {
+                    realign(&root);
+                }
+            }
+        });
+        _ = document().fonts().add_event_listener_with_callback("loadingdone", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
+    _ = Reflect::set(&root, &JsValue::from_str(PROP_STATE), &state);
 
     // Done
     return root;
 }
 
-pub fn get_text_lines(root: &Element) -> Vec<String> {
-    let mut out = vec![];
-    let mut line = root.get_elements_by_class_name(CLASS_LINE).item(0).map(|x| x.dyn_into::<Node>().unwrap());
-    while let Some(line1) = line {
-        let mut line_text = String::new();
-        recurse_get_text(&line1, &mut Default::default(), &mut line_text, &mut Default::default());
-        out.push(line_text);
-        line = line_scan(&line1, ScanDirection::Forward, ScanInclusivity::Exclusive);
-    }
-    return out;
-}
-
 #[wasm_bindgen(js_name = "getText")]
 pub fn get_text(root: &Element) -> String {
-    return get_text_lines(root).join("\n");
+    flush(root);
+    return textformat::export_lines(&all_lines(root).iter().map(export_line).collect::<Vec<_>>());
 }
 
 #[wasm_bindgen(js_name = "setText")]
-pub fn set_text(root: &Element, text: &str) {
-    root.set_inner_html("");
-    set_text_internal(root, text);
+pub fn set_text(root: &Element, markdown_text: &str) {
+    flush(root);
+    load_text(root, markdown_text);
+    editor_op(root, "reset");
+}
+
+#[wasm_bindgen]
+pub fn undo(root: &Element) -> bool {
+    return editor_op(root, "undo");
+}
+
+#[wasm_bindgen]
+pub fn redo(root: &Element) -> bool {
+    return editor_op(root, "redo");
+}
+
+#[wasm_bindgen(js_name = "canUndo")]
+pub fn can_undo(root: &Element) -> bool {
+    flush(root);
+    return editor_op(root, "canUndo");
+}
+
+#[wasm_bindgen(js_name = "canRedo")]
+pub fn can_redo(root: &Element) -> bool {
+    flush(root);
+    return editor_op(root, "canRedo");
+}
+
+pub struct Editor {
+    root: Element,
+}
+
+impl Editor {
+    pub fn new(markdown_text: &str) -> Self {
+        return Editor { root: build(markdown_text) };
+    }
+
+    pub fn root(&self) -> &Element {
+        return &self.root;
+    }
+
+    pub fn get_text(&self) -> String {
+        return get_text(&self.root);
+    }
+
+    pub fn set_text(&self, markdown_text: &str) {
+        set_text(&self.root, markdown_text);
+    }
+
+    pub fn undo(&self) -> bool {
+        return undo(&self.root);
+    }
+
+    pub fn redo(&self) -> bool {
+        return redo(&self.root);
+    }
+
+    pub fn can_undo(&self) -> bool {
+        return can_undo(&self.root);
+    }
+
+    pub fn can_redo(&self) -> bool {
+        return can_redo(&self.root);
+    }
+}
+
+impl Drop for Editor {
+    fn drop(&mut self) {
+        destroy(&self.root);
+    }
 }

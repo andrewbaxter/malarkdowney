@@ -1,11 +1,3 @@
-use {
-    flowcontrol::shed,
-    std::{
-        mem::swap,
-        str::Chars,
-    },
-};
-
 pub struct InlineStrong {
     pub begin_delim: String,
     pub children: Vec<Inline>,
@@ -60,107 +52,6 @@ pub enum Inline {
     Code(InlineCode),
 }
 
-#[derive(Clone)]
-struct Cursor<'a> {
-    iter: Chars<'a>,
-    prev_iter: Option<Chars<'a>>,
-}
-
-impl<'a> Cursor<'a> {
-    fn read(&mut self) -> Option<char> {
-        self.prev_iter = Some(self.iter.clone());
-        return self.iter.next()
-    }
-
-    fn undo(&mut self) {
-        self.iter = self.prev_iter.take().unwrap();
-    }
-
-    fn commit(&mut self, other: Cursor<'a>) {
-        self.iter = other.iter;
-        self.prev_iter = other.prev_iter;
-    }
-}
-
-pub fn parse(text: &str) -> Vec<Inline> {
-    return parse_inline(&mut Cursor {
-        iter: text.chars(),
-        prev_iter: None,
-    }, None);
-}
-
-fn parse_inline(c: &mut Cursor, want_end: Option<char>) -> Vec<Inline> {
-    let mut children = vec![];
-
-    struct Text {
-        text: String,
-    }
-
-    impl Text {
-        fn push(&mut self, c: char) {
-            self.text.push(c);
-        }
-
-        fn flush(&mut self) -> Vec<Inline> {
-            let mut done = String::new();
-            swap(&mut self.text, &mut done);
-            if done.is_empty() {
-                return vec![];
-            } else {
-                return vec![Inline::Text(done)];
-            }
-        }
-    }
-
-    let mut text = Text { text: String::new() };
-    let mut escape = false;
-    loop {
-        let Some(next) = c.read() else {
-            children.extend(text.flush());
-            return children;
-        };
-        if escape {
-            escape = false;
-            text.push(next);
-        } else {
-            if Some(next) == want_end {
-                c.undo();
-                children.extend(text.flush());
-                return children;
-            }
-            match next {
-                ESCAPE => {
-                    escape = true;
-                    text.push(next);
-                },
-                STRONG_DELIM => {
-                    children.extend(text.flush());
-                    children.push(parse_strong(c));
-                },
-                STRIKE_DELIM => {
-                    children.extend(text.flush());
-                    children.push(parse_strike(c));
-                },
-                EMPHASIS_DELIM => {
-                    children.extend(text.flush());
-                    children.push(parse_emphasis(c));
-                },
-                CODE_DELIM => {
-                    children.extend(text.flush());
-                    children.push(parse_code(c));
-                },
-                LINK_BEGIN_DELIM => {
-                    children.extend(text.flush());
-                    children.push(parse_link(c));
-                },
-                _ => {
-                    text.push(next);
-                },
-            }
-        }
-    }
-}
-
 const ESCAPE: char = '\\';
 pub const STRONG_DELIM: char = '*';
 pub const STRIKE_DELIM: char = '~';
@@ -171,234 +62,329 @@ pub const LINK_END_DELIM: char = ']';
 pub const LINK_ADDR_BEGIN_DELIM: char = '(';
 pub const LINK_ADDR_END_DELIM: char = ')';
 
-fn parse_symmetric(
-    c: &mut Cursor,
-    delim: char,
-    build: impl FnOnce(Vec<Inline>, String, Option<String>) -> Inline,
-) -> Inline {
-    let mut complete = false;
-    let children = parse_inline(c, Some(delim));
-    shed!{
-        let Some(next) = c.read() else {
-            break;
-        };
-        if next != delim {
-            c.undo();
-            break;
-        }
-        complete = true;
+struct Cursor {
+    chars: Vec<char>,
+    i: usize,
+}
+
+impl Cursor {
+    fn peek(&self) -> Option<char> {
+        return self.chars.get(self.i).copied();
     }
-    return build(children, delim.to_string(), if complete {
-        Some(delim.to_string())
-    } else {
-        None
-    });
-}
 
-fn parse_strong(c: &mut Cursor) -> Inline {
-    return parse_symmetric(c, STRONG_DELIM, |children, begin_delim, end_delim| Inline::Strong(InlineStrong {
-        begin_delim: begin_delim,
-        children: children,
-        end_delim: end_delim,
-    }));
-}
-
-fn parse_strike(c: &mut Cursor) -> Inline {
-    return parse_symmetric(
-        c,
-        STRIKE_DELIM,
-        |children, begin_delim, end_delim| Inline::Strikethrough(InlineStrikethrough {
-            begin_delim: begin_delim,
-            children: children,
-            end_delim: end_delim,
-        }),
-    );
-}
-
-fn parse_emphasis(c: &mut Cursor) -> Inline {
-    return parse_symmetric(c, EMPHASIS_DELIM, |children, begin_delim, end_delim| Inline::Emphasis(InlineEmphasis {
-        begin_delim: begin_delim,
-        children: children,
-        end_delim: end_delim,
-    }));
-}
-
-fn parse_code(c: &mut Cursor) -> Inline {
-    let mut complete = false;
-    let mut text = CODE_DELIM.to_string();
-    shed!{
-        'eof _;
-        // Count repeated begin delimiters
-        let mut extra_delim_reps = 0;
-        loop {
-            let Some(next) = c.read() else {
-                break 'eof;
-            };
-            if next != CODE_DELIM {
-                c.undo();
-                break;
-            }
-            text.push(next);
-            extra_delim_reps += 1;
+    fn peek_at(&self, rel: isize) -> Option<char> {
+        let at = self.i as isize + rel;
+        if at < 0 {
+            return None;
         }
-        // Read body and end
-        'read_text : loop {
-            let Some(next) = c.read() else {
-                break 'eof;
-            };
+        return self.chars.get(at as usize).copied();
+    }
 
-            // If next char is delim, try to read the same number of delims as at the begin
-            if next == CODE_DELIM {
-                shed!{
-                    'not_end _;
-                    let mut c1 = c.clone();
-                    for _ in 0 .. extra_delim_reps {
-                        let Some(next1) = c1.read() else {
-                            break 'eof;
-                        };
-                        if next1 != CODE_DELIM {
-                            break 'not_end;
-                        }
-                    }
-                    for _ in 0 .. (extra_delim_reps + 1) {
-                        text.push(CODE_DELIM);
-                    }
-                    c.commit(c1);
-                    break 'read_text;
-                };
-            }
-
-            // Otherwise the char is code text
-            text.push(next);
+    fn advance(&mut self) -> Option<char> {
+        let out = self.peek();
+        if out.is_some() {
+            self.i += 1;
         }
-        complete = true;
+        return out;
+    }
+}
+
+fn is_closer(c: &Cursor) -> bool {
+    let Some(prev) = c.peek_at(-1) else {
+        return false;
     };
-    return Inline::Code(InlineCode {
-        incomplete: !complete,
-        text: text,
-    });
+    if prev.is_whitespace() {
+        return false;
+    }
+    if let Some(next) = c.peek_at(1) {
+        if next.is_alphanumeric() {
+            return false;
+        }
+    }
+    return true;
 }
 
-fn parse_link(c: &mut Cursor) -> Inline {
-    let mut complete = false;
-    let title = parse_inline(c, Some(LINK_END_DELIM));
-    let continuation = shed!{
-        let Some(next) = c.read() else {
-            break None;
-        };
-        if next != LINK_END_DELIM {
-            c.undo();
-            break None;
+pub fn parse(text: &str) -> Vec<Inline> {
+    return parse_inline(&mut Cursor {
+        chars: text.chars().collect(),
+        i: 0,
+    }, &[]);
+}
+
+fn parse_inline(c: &mut Cursor, ends: &[char]) -> Vec<Inline> {
+    let mut children = vec![];
+    let mut text = String::new();
+
+    fn flush(children: &mut Vec<Inline>, text: &mut String) {
+        if !text.is_empty() {
+            children.push(Inline::Text(std::mem::take(text)));
         }
-        Some(InlineLinkContinuation {
-            title_end_delim: next.to_string(),
-            address: shed!{
-                let Some(next) = c.read() else {
-                    break None;
-                };
-                if next != '(' {
-                    c.undo();
-                    break None;
+    }
+
+    loop {
+        let Some(next) = c.peek() else {
+            flush(&mut children, &mut text);
+            return children;
+        };
+        if ends.contains(&next) && (next == LINK_END_DELIM || is_closer(c)) {
+            flush(&mut children, &mut text);
+            return children;
+        }
+        match next {
+            ESCAPE => {
+                c.advance();
+                text.push(next);
+                if let Some(escaped) = c.advance() {
+                    text.push(escaped);
                 }
-                let mut addr_text = "".to_string();
-                let mut addr_suffix = "".to_string();
-                let mut escape = false;
-                loop {
-                    let Some(next) = c.read() else {
-                        break;
-                    };
-                    if escape {
-                        escape = false;
-                        addr_text.push(next);
-                    } else {
-                        match next {
-                            ESCAPE => {
-                                addr_text.push(next);
-                                escape = true;
-                            },
-                            ')' => {
-                                complete = true;
-                                addr_suffix.push(next);
-                                break;
-                            },
-                            _ => {
-                                addr_text.push(next);
-                            },
-                        }
-                    }
-                }
-                Some(InlineLinkAddress {
-                    begin_delim: next.to_string(),
-                    address: addr_text,
-                    end_delim: addr_suffix,
-                })
             },
-        })
-    };
-    return Inline::Link(InlineLink {
-        incomplete: !complete,
-        title_begin_delim: LINK_BEGIN_DELIM.to_string(),
-        title: title,
-        continuation: continuation,
-    });
+            STRONG_DELIM | STRIKE_DELIM | EMPHASIS_DELIM if
+                c.peek_at(1).map_or(false, |n| !n.is_whitespace()) &&
+                    c.peek_at(-1).map_or(true, |p| !p.is_alphanumeric()) => {
+                flush(&mut children, &mut text);
+                children.push({
+                    c.advance();
+                    let children = parse_inline(c, &with_end(ends, next));
+                    let end_delim = if c.peek() == Some(next) && is_closer(c) {
+                        c.advance();
+                        Some(next.to_string())
+                    } else {
+                        None
+                    };
+                    let begin_delim = next.to_string();
+                    match next {
+                        STRONG_DELIM => Inline::Strong(InlineStrong {
+                            begin_delim: begin_delim,
+                            children: children,
+                            end_delim: end_delim,
+                        }),
+                        EMPHASIS_DELIM => Inline::Emphasis(InlineEmphasis {
+                            begin_delim: begin_delim,
+                            children: children,
+                            end_delim: end_delim,
+                        }),
+                        STRIKE_DELIM => Inline::Strikethrough(InlineStrikethrough {
+                            begin_delim: begin_delim,
+                            children: children,
+                            end_delim: end_delim,
+                        }),
+                        _ => unreachable!(),
+                    }
+                });
+            },
+            CODE_DELIM => {
+                flush(&mut children, &mut text);
+                children.push({
+                    let start = c.i;
+                    let mut open_len = 0;
+                    while c.peek() == Some(CODE_DELIM) {
+                        c.advance();
+                        open_len += 1;
+                    }
+                    let body_start = c.i;
+                    let mut complete = false;
+                    let mut at = body_start;
+                    while at < c.chars.len() {
+                        if c.chars[at] != CODE_DELIM {
+                            at += 1;
+                            continue;
+                        }
+                        let run_start = at;
+                        while at < c.chars.len() && c.chars[at] == CODE_DELIM {
+                            at += 1;
+                        }
+                        if at - run_start == open_len {
+                            complete = true;
+                            break;
+                        }
+                    }
+                    c.i = at;
+                    Inline::Code(InlineCode {
+                        incomplete: !complete,
+                        text: c.chars[start .. c.i].iter().collect(),
+                    })
+                });
+            },
+            LINK_BEGIN_DELIM => {
+                flush(&mut children, &mut text);
+                children.push({
+                    c.advance();
+                    let mut complete = false;
+                    let title = parse_inline(c, &with_end(ends, LINK_END_DELIM));
+                    let continuation = if c.peek() == Some(LINK_END_DELIM) {
+                        c.advance();
+                        Some(InlineLinkContinuation {
+                            title_end_delim: LINK_END_DELIM.to_string(),
+                            address: if c.peek() == Some(LINK_ADDR_BEGIN_DELIM) {
+                                c.advance();
+                                let mut address = String::new();
+                                let mut end_delim = String::new();
+                                while let Some(next) = c.advance() {
+                                    match next {
+                                        ESCAPE => {
+                                            address.push(next);
+                                            if let Some(escaped) = c.advance() {
+                                                address.push(escaped);
+                                            }
+                                        },
+                                        LINK_ADDR_END_DELIM => {
+                                            complete = true;
+                                            end_delim.push(next);
+                                            break;
+                                        },
+                                        _ => {
+                                            address.push(next);
+                                        },
+                                    }
+                                }
+                                Some(InlineLinkAddress {
+                                    begin_delim: LINK_ADDR_BEGIN_DELIM.to_string(),
+                                    address: address,
+                                    end_delim: end_delim,
+                                })
+                            } else {
+                                None
+                            },
+                        })
+                    } else {
+                        None
+                    };
+                    Inline::Link(InlineLink {
+                        incomplete: !complete,
+                        title_begin_delim: LINK_BEGIN_DELIM.to_string(),
+                        title: title,
+                        continuation: continuation,
+                    })
+                });
+            },
+            _ => {
+                c.advance();
+                text.push(next);
+            },
+        }
+    }
 }
 
-pub fn text(text: impl AsRef<str>) -> Inline {
-    return Inline::Text(text.as_ref().to_string());
+fn with_end(ends: &[char], end: char) -> Vec<char> {
+    let mut out = ends.to_vec();
+    out.push(end);
+    return out;
 }
 
-pub fn strong(children: Vec<Inline>) -> Inline {
-    return Inline::Strong(InlineStrong {
-        begin_delim: STRONG_DELIM.to_string(),
-        children: children,
-        end_delim: Some(STRONG_DELIM.to_string()),
-    });
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-pub fn emphasis(children: Vec<Inline>) -> Inline {
-    return Inline::Emphasis(InlineEmphasis {
-        begin_delim: EMPHASIS_DELIM.to_string(),
-        children: children,
-        end_delim: Some(EMPHASIS_DELIM.to_string()),
-    });
-}
-
-pub fn code(text: impl AsRef<str>) -> Inline {
-    let text = text.as_ref();
-    let mut longest_run = 0;
-    let mut run = 0;
-    for c in text.chars() {
-        if c == CODE_DELIM {
-            run += 1;
-        } else {
-            if run > longest_run {
-                longest_run = run;
-                run = 0;
+    fn unparse(inlines: &[Inline], out: &mut String) {
+        for i in inlines {
+            match i {
+                Inline::Text(t) => out.push_str(t),
+                Inline::Strong(InlineStrong { begin_delim, children, end_delim }) |
+                Inline::Emphasis(InlineEmphasis { begin_delim, children, end_delim }) |
+                Inline::Strikethrough(InlineStrikethrough { begin_delim, children, end_delim }) => {
+                    out.push_str(begin_delim);
+                    unparse(children, out);
+                    if let Some(e) = end_delim {
+                        out.push_str(e);
+                    }
+                },
+                Inline::Code(code) => out.push_str(&code.text),
+                Inline::Link(link) => {
+                    out.push_str(&link.title_begin_delim);
+                    unparse(&link.title, out);
+                    if let Some(cont) = &link.continuation {
+                        out.push_str(&cont.title_end_delim);
+                        if let Some(addr) = &cont.address {
+                            out.push_str(&addr.begin_delim);
+                            out.push_str(&addr.address);
+                            out.push_str(&addr.end_delim);
+                        }
+                    }
+                },
             }
         }
     }
-    if run > longest_run {
-        longest_run = run;
-    }
-    let delim = CODE_DELIM.to_string().repeat(longest_run + 1);
-    return Inline::Code(InlineCode {
-        incomplete: false,
-        text: format!("{}{}{}", delim, text, delim),
-    })
-}
 
-pub fn link(title: Vec<Inline>, address: impl AsRef<str>) -> Inline {
-    return Inline::Link(InlineLink {
-        incomplete: false,
-        title_begin_delim: LINK_BEGIN_DELIM.to_string(),
-        title: title,
-        continuation: Some(InlineLinkContinuation {
-            title_end_delim: LINK_END_DELIM.to_string(),
-            address: Some(InlineLinkAddress {
-                begin_delim: LINK_ADDR_BEGIN_DELIM.to_string(),
-                address: address.as_ref().to_string(),
-                end_delim: LINK_ADDR_END_DELIM.to_string(),
-            }),
-        }),
-    });
+    fn dump(inlines: &[Inline]) -> String {
+        let mut out = String::new();
+        for i in inlines {
+            match i {
+                Inline::Text(t) => out.push_str(&format!("T({})", t)),
+                Inline::Strong(s) => out.push_str(&format!("S{}[{}]", if s.end_delim.is_some() {
+                    ""
+                } else {
+                    "?"
+                }, dump(&s.children))),
+                Inline::Emphasis(s) => out.push_str(&format!("E{}[{}]", if s.end_delim.is_some() {
+                    ""
+                } else {
+                    "?"
+                }, dump(&s.children))),
+                Inline::Strikethrough(s) => out.push_str(&format!("X{}[{}]", if s.end_delim.is_some() {
+                    ""
+                } else {
+                    "?"
+                }, dump(&s.children))),
+                Inline::Code(c) => out.push_str(&format!("C{}({})", if c.incomplete {
+                    "?"
+                } else {
+                    ""
+                }, c.text)),
+                Inline::Link(l) => out.push_str(&format!("L{}[{}]", if l.incomplete {
+                    "?"
+                } else {
+                    ""
+                }, dump(&l.title))),
+            }
+        }
+        return out;
+    }
+
+    #[test]
+    fn round_trip_exhaustive() {
+        let alphabet = ['*', '_', '~', '`', '[', ']', '(', ')', '\\', 'a', ' ', 'é'];
+        let mut s = vec![];
+
+        fn rec(alphabet: &[char], s: &mut Vec<char>, depth: usize) {
+            let text: String = s.iter().collect();
+            let mut out = String::new();
+            unparse(&parse(&text), &mut out);
+            assert_eq!(out, text);
+            if depth == 0 {
+                return;
+            }
+            for c in alphabet {
+                s.push(*c);
+                rec(alphabet, s, depth - 1);
+                s.pop();
+            }
+        }
+
+        rec(&alphabet, &mut s, 5);
+    }
+
+    #[test]
+    fn structure() {
+        for (
+            input,
+            want,
+        ) in [
+            ("*bold*", "S[T(bold)]"),
+            ("_em_ ~s~", "E[T(em)]T( )X[T(s)]"),
+            ("*unclosed", "S?[T(unclosed)]"),
+            ("snake_case_name", "T(snake_case_name)"),
+            ("2 * 3 * 4", "T(2 * 3 * 4)"),
+            ("a*b*c", "T(a*b*c)"),
+            ("*a _b* c", "S[T(a )E?[T(b)]]T( c)"),
+            ("[a *b](c)", "L[T(a )S?[T(b)]]"),
+            ("[t](u) x", "L[T(t)]T( x)"),
+            ("``a`", "C?(``a`)"),
+            ("```a``", "C?(```a``)"),
+            ("``a`b``c", "C(``a`b``)T(c)"),
+            ("`a``b`", "C(`a``b`)"),
+            ("\\*x*", "T(\\*x*)"),
+        ] {
+            assert_eq!(dump(&parse(input)), want, "input: {:?}", input);
+        }
+    }
 }

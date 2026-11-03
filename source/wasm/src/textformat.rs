@@ -1,0 +1,203 @@
+//! Conversion between editor lines and exchangeable markdown text.
+//!
+//! In the editor every line is its own block, but in markdown consecutive lines
+//! are merged into one paragraph. So on export a blank separator line is added
+//! after each non-empty line, and on import the first blank line after a non-empty
+//! line is dropped. Code block lines are exempt in both directions since blank
+//! lines there are literal.
+//!
+//! Inside quotes the separator is a bare `>` (for each shared quote level) rather
+//! than an empty line, since an empty line would end the quote.
+
+/// One level of block nesting a line is in
+#[derive(Clone, Debug)]
+pub struct ExportBlock {
+    /// Unique per block, used to tell whether two consecutive lines are in the same
+    /// block
+    pub id: usize,
+    pub quote: bool,
+    /// Length (in chars) of the line's prefix for this block, i.e. `"> "`, `"* "`,
+    /// `"   "`
+    pub prefix_len: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportLine {
+    /// Full line text including block prefixes
+    pub text: String,
+    /// Line is part of a code block (including the fence lines)
+    pub code: bool,
+    /// Line has nothing after its block prefixes
+    pub content_empty: bool,
+    /// Outermost first
+    pub blocks: Vec<ExportBlock>,
+}
+
+pub fn export_lines(lines: &[ExportLine]) -> String {
+    let mut out = String::new();
+    for (i, line) in lines.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+
+            // Separator line between the previous line and this
+            let a = &lines[i - 1];
+            let b = line;
+            let separator = 'separator: {
+                if a.code || b.code || a.content_empty {
+                    break 'separator None;
+                }
+                let mut shared = 0;
+                while shared < a.blocks.len() && shared < b.blocks.len() && a.blocks[shared].id == b.blocks[shared].id {
+                    shared += 1;
+                }
+                let Some(last_quote) = b.blocks[.. shared].iter().rposition(|x| x.quote) else {
+                    break 'separator Some(String::new());
+                };
+                let mut sep = String::new();
+                for block in &b.blocks[..= last_quote] {
+                    if block.quote {
+                        sep.push_str("> ");
+                    } else {
+                        sep.push_str(&" ".repeat(block.prefix_len));
+                    }
+                }
+                break 'separator Some(sep.trim_end().to_string());
+            };
+            if let Some(sep) = separator {
+                out.push_str(&sep);
+                out.push('\n');
+            }
+        }
+        out.push_str(&line.text);
+    }
+    return out;
+}
+
+/// Split markdown text into editor lines, dropping the separator lines that
+/// `export_lines` adds.
+pub fn import_lines(text: &str) -> Vec<String> {
+    let mut out = vec![];
+    let mut in_code = false;
+    let mut prev_droppable = false;
+    for line in text.split('\n') {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+
+        // Strip block prefixes (quote markers, list markers, indentation) to find
+        // whether the line content is a code fence.
+        let fence = {
+            let mut at = line;
+            loop {
+                let trimmed = at.trim_start_matches(|c: char| c == '>' || c.is_whitespace());
+                let trimmed = if let Some(rest) = trimmed.strip_prefix("* ").or_else(|| trimmed.strip_prefix("- ")) {
+                    rest
+                } else {
+                    let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+                    if digits > 0 && trimmed[digits..].starts_with(". ") {
+                        &trimmed[digits + 2..]
+                    } else {
+                        trimmed
+                    }
+                };
+                if trimmed.len() == at.len() {
+                    break;
+                }
+                at = trimmed;
+            }
+            at.starts_with("```")
+        };
+        let code = in_code || fence;
+        if fence {
+            in_code = !in_code;
+        }
+
+        // Blank: only quote markers and whitespace
+        if !code && line.chars().all(|c| c == '>' || c.is_whitespace()) {
+            if prev_droppable {
+                prev_droppable = false;
+                continue;
+            }
+        } else {
+            prev_droppable = !code;
+        }
+        out.push(line.to_string());
+    }
+    return out;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn line(text: &str, code: bool, blocks: &[(usize, bool, usize)]) -> ExportLine {
+        let prefix: usize = blocks.iter().map(|b| b.2).sum();
+        return ExportLine {
+            text: text.to_string(),
+            code: code,
+            content_empty: text.chars().count() <= prefix,
+            blocks: blocks.iter().map(|(id, quote, prefix_len)| ExportBlock {
+                id: *id,
+                quote: *quote,
+                prefix_len: *prefix_len,
+            }).collect(),
+        };
+    }
+
+    fn check(lines: &[ExportLine], want: &str) {
+        let got = export_lines(lines);
+        assert_eq!(got, want);
+        let want_lines: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(import_lines(&got), want_lines, "import of {:?}", got);
+    }
+
+    #[test]
+    fn paragraphs() {
+        check(&[line("a", false, &[]), line("b", false, &[])], "a\n\nb");
+        check(&[line("a", false, &[]), line("", false, &[]), line("b", false, &[])], "a\n\n\nb");
+        check(&[line("a", false, &[]), line("", false, &[]), line("", false, &[]), line("b", false, &[])], "a\n\n\n\nb");
+        check(&[line("a", false, &[]), line("", false, &[])], "a\n\n");
+    }
+
+    #[test]
+    fn quotes() {
+        let q = (1, true, 2);
+        check(&[line("> a", false, &[q]), line("> b", false, &[q])], "> a\n>\n> b");
+        check(&[line("> a", false, &[q]), line("> ", false, &[q]), line("> b", false, &[q])], "> a\n>\n> \n> b");
+        check(&[line("> a", false, &[q]), line("b", false, &[])], "> a\n\nb");
+        // List in a quote
+        check(
+            &[line("> * a", false, &[q, (2, false, 2)]), line(">    b", false, &[q, (2, false, 3)])],
+            "> * a\n>\n>    b",
+        );
+        // Quote in a list
+        check(
+            &[line("* > a", false, &[(3, false, 2), (4, true, 2)]), line("  > b", false, &[(3, false, 2), (4, true, 2)])],
+            "* > a\n  >\n  > b",
+        );
+    }
+
+    #[test]
+    fn code() {
+        check(
+            &[
+                line("a", false, &[]),
+                line("```", true, &[]),
+                line("x", true, &[]),
+                line("", true, &[]),
+                line("y", true, &[]),
+                line("```", true, &[]),
+                line("", false, &[]),
+                line("b", false, &[]),
+            ],
+            "a\n```\nx\n\ny\n```\n\nb",
+        );
+        check(&[line("* ```", true, &[(1, false, 2)]), line("  ", true, &[(1, false, 2)])], "* ```\n  ");
+    }
+
+    #[test]
+    fn import_external() {
+        // Trailing newline from files
+        assert_eq!(import_lines("a\n"), vec!["a"]);
+        assert_eq!(import_lines("a\r\n\r\nb\r\n"), vec!["a", "b"]);
+        assert_eq!(import_lines(""), vec![""]);
+    }
+}

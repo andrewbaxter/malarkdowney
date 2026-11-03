@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<link rel="stylesheet" href="malarkdowney.css"><link rel="stylesheet" href="style.css">
+</head><body>
+<script type="module">
+import init, * as md from "./malarkdowney.js";
+await init();
+window.md = md;
+window.errors = [];
+window.addEventListener("error", e => window.errors.push(String(e.message)));
+window.mk = (text) => {
+  document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove());
+  const e = md.build(text);
+  document.body.appendChild(e);
+  e.focus();
+  window.ed = e;
+  return e;
+};
+// All text nodes in editor order
+window.texts = () => {
+  const w = document.createTreeWalker(window.ed, NodeFilter.SHOW_TEXT);
+  const out = []; let n; while ((n = w.nextNode())) out.push(n); return out;
+};
+// Place caret at utf16 offset into whole-editor text (excluding line breaks)
+window.caretAt = (off, focusOff) => {
+  const pt = (o) => { for (const t of texts()) { if (o <= t.length) return [t, o]; o -= t.length; } const ts = texts(); const l = ts[ts.length-1]; return [l, l.length]; };
+  const [a, ao] = pt(off); const [f, fo] = pt(focusOff ?? off);
+  getSelection().setBaseAndExtent(a, ao, f, fo);
+};
+window.caretInfo = () => { const s = getSelection(); const r = document.createRange(); r.setStart(window.ed, 0); r.setEnd(s.anchorNode, s.anchorOffset); return {anchor: r.toString().length, collapsed: s.isCollapsed, text: s.toString()}; };
+window.ready = true;
+</script></body></html>
