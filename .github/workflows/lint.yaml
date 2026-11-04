@@ -1,0 +1,33 @@
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+jobs:
+  rust-ai-lint:
+    runs-on: ubuntu-latest
+    env:
+      NIXPKGS_REV: f3a73bcf5d1c5b75a66cf35a48957e30d41d647a
+      AGAINST: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: cachix/install-nix-action@v31
+        with:
+          nix_path: nixpkgs=https://github.com/NixOS/nixpkgs/archive/${{ env.NIXPKGS_REV }}.tar.gz
+      - name: Build rust-ai-lint
+        run: |
+          set -eu
+          git clone --depth 1 https://github.com/andrewbaxter/rust-ai-lint.git "$RUNNER_TEMP/rust-ai-lint"
+          nix-build --out-link "$RUNNER_TEMP/lint" "$RUNNER_TEMP/rust-ai-lint"
+      - name: Lint
+        run: |
+          set -u
+          status=0
+          "$RUNNER_TEMP/lint/bin/rust-ai-lint" --against "$AGAINST" || status=1
+          if ! git diff --exit-code; then
+            echo "rust-ai-lint rewrote files; run it locally and commit the result" >&2
+            status=1
+          fi
+          exit $status

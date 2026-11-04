@@ -1,0 +1,9 @@
+#!/bin/sh
+set -e
+lint=$(command -v rust-ai-lint || echo "$HOME/.local/bin/rust-ai-lint")
+if [ ! -x "$lint" ]; then
+    echo "pre-commit: rust-ai-lint is not installed; see https://github.com/andrewbaxter/rust-ai-lint" >&2
+    exit 1
+fi
+cd "$(git rev-parse --show-toplevel)"
+exec "$lint"
