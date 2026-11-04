@@ -1,7 +1,7 @@
 const eq = (a, b, msg) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg || "mismatch"}: got ${JSON.stringify(a)} want ${JSON.stringify(b)}`); };
 const DEB = 450; // > 200ms debounce
 
-export default async (test, { ev, key, type, sleep }) => {
+export default async (test, { ev, key, type, sleep, s }) => {
   await test("utf16: typing after multibyte text doesn't crash or misplace caret", async () => {
     await ev(`mk("")`);
     await type("éé*");
@@ -73,13 +73,43 @@ export default async (test, { ev, key, type, sleep }) => {
     });
   }
 
-  await test("lines: separate editor paragraphs export as separate markdown paragraphs", async () => {
+  await test("lines: separate editor lines export as separate markdown paragraphs", async () => {
     await ev(`mk("")`);
     await type("one");
     await key("Enter");
     await type("two");
     await sleep(DEB);
     eq(await ev("md.getText(ed)"), "one\n\ntwo");
+    await key("Enter");
+    await key("Enter");
+    await sleep(DEB);
+    eq(await ev("ed.querySelectorAll('.malarkdowney_line').length"), 4, "two trailing empty lines");
+    const text = await ev("md.getText(ed)");
+    eq(text, "one\n\ntwo\n\n\n");
+    eq(await ev(`md.setText(ed, ${JSON.stringify(text)}); md.getText(ed)`), text, "round trips");
+    await ev(`caretAt(0); getSelection().collapse(ed.querySelector('.malarkdowney_line:last-child'), 0)`);
+    await key("Backspace");
+    await key("Backspace");
+    await sleep(DEB);
+    eq(await ev("[md.getText(ed), ed.querySelectorAll('.malarkdowney_line').length]"), ["one\n\ntwo", 2], "each Backspace removes one line");
+  });
+
+  await test("lines: no phantom trailing lines after deleting everything", async () => {
+    await ev(`mk("a\\n\\nb")`);
+    await sleep(DEB);
+    await ev("getSelection().selectAllChildren(ed)");
+    await key("Backspace");
+    await sleep(DEB);
+    eq(await ev("[md.getText(ed), ed.querySelectorAll('.malarkdowney_line').length]"), ["", 1]);
+    await type("x");
+    await key("Enter");
+    await sleep(DEB);
+    eq(await ev("ed.querySelectorAll('.malarkdowney_line').length"), 2);
+    await key("Backspace");
+    await key("Backspace");
+    await sleep(DEB);
+    eq(await ev("[md.getText(ed), ed.querySelectorAll('.malarkdowney_line').length]"), ["", 1], "back to one empty line");
+    eq(await ev("errors"), []);
   });
 
   await test("paste: multi-line plain text becomes lines, caret at end", async () => {
@@ -146,7 +176,7 @@ export default async (test, { ev, key, type, sleep }) => {
 
 
   await test("arrow down/up moves between lines in different blocks", async () => {
-    await ev(`mk("> abc\\n\\nxyz")`);
+    await ev(`mk("> abc\\nxyz")`);
     await sleep(DEB);
     await ev(`caretAt(3)`); // after "> a"
     await key("ArrowDown");
@@ -155,6 +185,25 @@ export default async (test, { ev, key, type, sleep }) => {
     await key("ArrowUp");
     const info2 = await ev("caretInfo()");
     if (!(info2.anchor >= 2 && info2.anchor <= 4)) throw new Error(`caret up ${info2.anchor}`);
+  });
+
+  await test("arrow down/up visits an empty line", async () => {
+    await ev(`mk("abc\\n\\n\\nxyz")`); // (the second blank line is kept as an empty line)
+    await sleep(DEB);
+    eq(await ev("ed.querySelectorAll('.malarkdowney_line').length"), 3);
+    const onEmpty = `(() => { const n = getSelection().anchorNode; return n.nodeType === 1 && n.textContent === "" && n.classList.contains("malarkdowney_line"); })()`;
+    await ev(`caretAt(1)`);
+    await key("ArrowDown");
+    eq(await ev(onEmpty), true, "down onto the empty line");
+    await key("ArrowDown");
+    const info = await ev("caretInfo()");
+    if (!(info.anchor >= 3 && info.anchor <= 6)) throw new Error(`caret ${info.anchor}`);
+    await ev(`caretAt(4)`);
+    await key("ArrowUp");
+    eq(await ev(onEmpty), true, "up onto the empty line");
+    await key("ArrowUp");
+    const info2 = await ev("caretInfo()");
+    if (!(info2.anchor >= 0 && info2.anchor <= 3)) throw new Error(`caret up ${info2.anchor}`);
   });
 
   await test("shift+arrow still extends the selection", async () => {
@@ -351,6 +400,174 @@ export default async (test, { ev, key, type, sleep }) => {
     }
     await sleep(DEB);
     eq(await ev("md.getText(ed).split('\\n').filter(x => x.trim() !== '' && x.trim() !== '>')"), ["> quote *b*", "> * item", ">    more", "1. one", "2. two _e_", "```", "code * x", "```", "## h2 [l](http://x)"]);
+    eq(await ev("errors"), []);
+  });
+
+  await test("join: Delete at end of an empty list item joins the next item without crashing", async () => {
+    // Chrome merges the two <p>s into one containing both prefix spans; placement then
+    // creates a nested list. Used to panic (and wipe the editor) when a third item followed.
+    await ev(`mk("* \\n* b\\n* c")`);
+    await sleep(DEB);
+    await ev(`(() => { const t = texts(); getSelection().collapse(t[0], 2); })()`);
+    await key("Delete");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "* * b\n\n* c");
+    eq(await ev("ed.querySelectorAll('.malarkdowney_block_ul').length"), 2, "nested list");
+    eq(await ev("errors"), []);
+  });
+
+  await test("recovery: unexpected DOM shape rebuilds from text instead of trapping", async ({ logs }) => {
+    await ev(`mk("* a\\n* b")`);
+    await sleep(DEB);
+    // Simulate a host (or browser) mangling the structure
+    await ev(`ed.querySelector('.malarkdowney_block').removeAttribute('malarkdowney_id')`);
+    await ev(`caretAt(6)`); // end of "b"
+    await type("c");
+    await sleep(DEB);
+    eq(logs.filter(l => l.includes("rebuilding from text")).length, 1, "rebuild logged");
+    logs.length = 0;
+    eq(await ev("md.getText(ed)"), "* a\n\n* bc", "text kept");
+    eq(await ev("!!ed.querySelector('.malarkdowney_block[malarkdowney_id]')"), true, "structure rebuilt");
+    eq((await ev("caretInfo()")).anchor, 7, "caret kept");
+    eq(await ev("errors"), []);
+    await type("d");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "* a\n\n* bcd", "editor still works");
+  });
+
+  await test("paste: replaces a selection spanning blocks, as one undo step", async () => {
+    await ev(`mk("* abc\\n> def\\nghi")`);
+    await sleep(DEB);
+    await ev("caretAt(3, 9)"); // "b" .. "e"
+    await ev(`(() => { const dt = new DataTransfer(); dt.setData("text/plain", "X\\nY"); ed.dispatchEvent(new ClipboardEvent("paste", {clipboardData: dt, bubbles: true, cancelable: true})); })()`);
+    eq(await ev("md.getText(ed)"), "* aX\n\nYf\n\nghi");
+    eq((await ev("caretInfo()")).anchor, 5, "caret after pasted text");
+    await key("z", CTRL);
+    eq(await ev("md.getText(ed)"), "* abc\n\n> def\n\nghi");
+  });
+
+  await test("paste: works with a root-level selection and into an empty editor", async () => {
+    await ev(`mk("")`);
+    await ev("getSelection().collapse(ed, 0)");
+    await ev(`(() => { const dt = new DataTransfer(); dt.setData("text/plain", "a\\nb"); ed.dispatchEvent(new ClipboardEvent("paste", {clipboardData: dt, bubbles: true, cancelable: true})); })()`);
+    eq(await ev("md.getText(ed)"), "a\n\nb");
+  });
+
+  await test("paste: non-text clipboard (e.g. an image) is ignored, no DOM junk", async () => {
+    await ev(`mk("a")`);
+    await sleep(DEB);
+    await ev("caretAt(1)");
+    await ev(`(() => { const dt = new DataTransfer(); dt.setData("text/html", "<img src=x>"); ed.dispatchEvent(new ClipboardEvent("paste", {clipboardData: dt, bubbles: true, cancelable: true})); })()`);
+    await sleep(DEB);
+    eq(await ev("[md.getText(ed), ed.querySelectorAll('img').length]"), ["a", 0]);
+  });
+
+  await test("drop: inserts plain text at the drop point", async () => {
+    await ev(`mk("abc")`);
+    await sleep(DEB);
+    const prevented = await ev(`(() => { const t = texts()[0]; const r = document.createRange(); r.setStart(t, 1); r.setEnd(t, 1); const b = r.getBoundingClientRect(); const dt = new DataTransfer(); dt.setData("text/plain", "X"); dt.setData("text/html", "<b>X</b>"); const e = new DragEvent("drop", {dataTransfer: dt, bubbles: true, cancelable: true, clientX: b.left, clientY: b.top + 2}); ed.dispatchEvent(e); return e.defaultPrevented; })()`);
+    eq(prevented, true, "default prevented");
+    eq(await ev("[md.getText(ed), ed.querySelectorAll('b').length]"), ["aXbc", 0]);
+  });
+
+  await test("prefix parsing: ordered list numbers and heading levels", async () => {
+    await ev(`mk("10. a\\n    b\\n# h\\n####### no\\n#no\\n1.no")`);
+    await sleep(DEB);
+    eq(await ev("[ed.querySelectorAll('.malarkdowney_block_ol').length, ed.querySelectorAll('.malarkdowney_block_ol p').length, ed.querySelectorAll('h1,h2,h3,h4,h5,h6').length]"), [1, 2, 1]);
+  });
+
+  await test("embedding: insertText at the caret, or appended when unfocused; change event; blank class", async () => {
+    await ev(`mk("ab")`);
+    await sleep(DEB);
+    await ev(`window.changes = 0; ed.addEventListener("malarkdowney-change", () => window.changes++)`);
+    await ev("caretAt(1)");
+    await ev(`md.insertText(ed, "😀")`);
+    eq(await ev("md.getText(ed)"), "a😀b");
+    eq((await ev("caretInfo()")).anchor, 3, "caret after insert");
+    await type("!");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "a😀!b");
+    await ev(`(() => { const b = document.createElement("button"); b.id = "btn"; document.body.appendChild(b); b.focus(); getSelection().removeAllRanges(); })()`);
+    await ev(`md.insertText(ed, "\\nend")`);
+    eq(await ev("[md.getText(ed), document.activeElement.id]"), ["a😀!b\n\nend", "btn"]);
+    await ev(`document.getElementById("btn").remove()`);
+    eq(await ev("changes"), 3, "one change event per insert/typing step");
+    eq(await ev("ed.classList.contains('malarkdowney_blank')"), false);
+    await ev(`md.setText(ed, "")`);
+    eq(await ev("ed.classList.contains('malarkdowney_blank')"), true, "blank after setText('')");
+    await ev(`md.setText(ed, "\\n")`);
+    eq(await ev("ed.classList.contains('malarkdowney_blank')"), true, "only empty lines is blank");
+    await ev("ed.focus(); getSelection().collapse(ed.querySelector('.malarkdowney_line'), 0)");
+    await type("x");
+    await sleep(DEB);
+    eq(await ev("ed.classList.contains('malarkdowney_blank')"), false, "not blank after typing");
+    await key("Backspace");
+    await sleep(DEB);
+    eq(await ev("ed.classList.contains('malarkdowney_blank')"), true, "blank again after deleting");
+    eq(await ev("[ed.getAttribute('role'), ed.getAttribute('aria-multiline')]"), ["textbox", "true"]);
+  });
+
+  await test("Enter inside a block continues it with the prefix, caret after the prefix", async () => {
+    await ev(`mk("> a")`);
+    await sleep(DEB);
+    await ev("caretAt(3)");
+    await key("Enter");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "> a\n>\n> ", "quote prefix generated");
+    await type("b");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "> a\n>\n> b", "typed after the prefix");
+    await key("Enter");
+    await type("c"); // before the pause: no prefix generated yet, the line leaves the quote
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "> a\n>\n> b\n\nc");
+
+    await ev(`mk("* a")`);
+    await sleep(DEB);
+    await ev("caretAt(3)");
+    await key("Enter");
+    await sleep(DEB);
+    await type("b");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "* a\n\n  b", "list continuation indent, typed after it");
+    await ev(`mk("1. a")`);
+    await sleep(DEB);
+    await ev("caretAt(4)");
+    await key("Enter");
+    await sleep(DEB);
+    await type("b");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "1. a\n\n   b", "ordered list continuation indent");
+  });
+
+  await test("newlineOnEnter: false - Enter reaches a normal keydown listener and inserts nothing, Shift+Enter still does", async () => {
+    await ev(`(() => { document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove()); const e = md.build("a", {newlineOnEnter: false}); document.body.appendChild(e); e.focus(); window.ed = e; window.enters = []; e.addEventListener("keydown", ev => { if (ev.key === "Enter") enters.push([ev.shiftKey, ev.defaultPrevented]); }); })()`);
+    await ev("caretAt(1)");
+    await key("Enter");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "a", "Enter didn't insert a newline");
+    eq(await ev("ed.querySelectorAll('.malarkdowney_line').length"), 1, "one line");
+    eq(await ev("enters"), [[false, false]], "listener saw an unhandled Enter");
+    await key("Enter", 8);
+    await type("b");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "a\nb", "Shift+Enter inserted a newline");
+    await ev(`mk("a"); caretAt(1)`);
+    await key("Enter");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "a\n\n", "default still inserts a newline");
+  });
+
+  await test("buildReadonly: renders, not editable, no event listeners", async () => {
+    await ev(`(() => { document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove()); window.ro = md.buildReadonly("# T\\n\\n* a _b_\\n\\n   cont"); document.body.appendChild(ro); })()`);
+    await sleep(100);
+    eq(await ev("[ro.hasAttribute('contenteditable'), ro.hasAttribute('role'), ro.isContentEditable]"), [false, false, false]);
+    eq(await ev("[!!ro.querySelector('h1'), !!ro.querySelector('em')]"), [true, true], "formatted");
+    eq(await ev("[...ro.querySelectorAll('.malarkdowney_block')].some(b => b.style.paddingLeft !== '')"), true, "list continuation aligned");
+    eq(await ev("md.getText(ro)"), "", "no editor state");
+    const { result } = await s("Runtime.evaluate", { expression: "ro" });
+    const { listeners } = await s("DOMDebugger.getEventListeners", { objectId: result.objectId, depth: -1 });
+    eq(listeners.map(l => l.type), [], "event listeners");
     eq(await ev("errors"), []);
   });
 };

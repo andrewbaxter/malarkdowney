@@ -18,6 +18,12 @@ Do `cargo add malarkdowney`
 
 - `build(markdown_text: &str) -> (rootin::El, Editor)` - Returns a [rooting](https://github.com/andrewbaxter/rooting) `El`, the editable markdown text block, and an `Editor` handle.
 
+  `Options` (`Options::default()` for the defaults):
+
+  - `newline_on_enter: bool` - Default `true`. When `false` Enter doesn't insert a newline (Shift+Enter still does), so you can handle Enter (e.g. to submit) with a normal `keydown` listener.
+
+- `build_readonly(markdown_text: &str) -> rooting::El` - Renders the markdown as a non-editable block, with no event listeners and no editor state.
+
 `Editor` methods:
 
 - `get_text()` - Returns the markdown text from the block.
@@ -28,21 +34,29 @@ Do `cargo add malarkdowney`
 
 - `can_undo()`, `can_redo()`
 
+- `insert_text(text: &str)` - Replaces the selection with the text (one undo step), or appends it if the selection isn't in the editor.
+
 # Typescript usage
 
 TODO publish to npm.
 
 Currently you can build the npm package (wasm, package.json, typescript definitions and glue javascript) by:
 
-1. `cargo install wasm-pack` (make sure it matches the version in `wasm/Cargo.lock`)
+1. `cargo install wasm-pack`
 
-2. In `wasm/` do `wasm-pack build`
+2. In `source/wasm/` do `wasm-pack build`
 
-3. The package is generated in `wasm/pkg`
+3. The package is generated in `source/wasm/pkg`
 
 In Javascript the editor is the element itself - everything is garbage collected along with it:
 
 - `build(markdownText: string)` - Returns an `Element`, the editable markdown text block.
+
+  `options` (optional):
+
+  - `newlineOnEnter?: boolean` - Default `true`. When `false` Enter doesn't insert a newline (Shift+Enter still does), so you can handle Enter (e.g. to submit) with a normal `keydown` listener.
+
+- `buildReadonly(markdownText: string)` - Returns an `Element`, the markdown rendered as a non-editable block, with no event listeners and no editor state.
 
 - `getText(element: Element)` - Returns the markdown text from the block.
 
@@ -51,6 +65,14 @@ In Javascript the editor is the element itself - everything is garbage collected
 - `undo(element: Element)`, `redo(element: Element)` - Undo/redo the last change, returns whether there was anything to undo/redo.
 
 - `canUndo(element: Element)`, `canRedo(element: Element)`
+
+- `insertText(element: Element, text: string)` - Replaces the selection with the text (one undo step), or appends it if the selection isn't in the editor.
+
+# Embedding
+
+- The element dispatches a `malarkdowney-change` event whenever the text changes (after the short pause the editor uses to group typing, and on undo/redo/`setText`). Call `getText` from the handler.
+
+- It has class `malarkdowney_blank` when empty.
 
 # Undo/redo
 

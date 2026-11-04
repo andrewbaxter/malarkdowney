@@ -9,7 +9,7 @@ use {
 
 fn main() {
     console_error_panic_hook::set_once();
-    let (m, editor) = malarkdowney::build(include_str!("../main.md"));
+    let (m, editor) = malarkdowney::build(include_str!("../main.md"), Default::default());
     let text = editor.get_text();
     set_root(
         vec![
