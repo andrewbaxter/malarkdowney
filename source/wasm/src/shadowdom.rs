@@ -65,7 +65,6 @@ pub fn sync_shadow_dom(changed: &mut bool, have: &Node, want: ShadowDom) -> Node
                 break have1;
             });
 
-            // Sync attrs
             {
                 let mut remove_attrs = vec![];
                 for k in have.get_attribute_names() {
@@ -91,7 +90,6 @@ pub fn sync_shadow_dom(changed: &mut bool, have: &Node, want: ShadowDom) -> Node
                 }
             }
 
-            // Sync classes
             let classes = have.class_list();
             {
                 let mut remove_classes = vec![];
@@ -115,7 +113,6 @@ pub fn sync_shadow_dom(changed: &mut bool, have: &Node, want: ShadowDom) -> Node
                 }
             }
 
-            // Sync children
             let have_children = have.child_nodes();
             let have_children_len = have_children.length() as usize;
             let mut want_children_iter = want.children.into_iter();

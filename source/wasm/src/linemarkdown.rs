@@ -18,23 +18,19 @@ pub struct InlineStrikethrough {
 
 pub struct InlineLink {
     pub incomplete: bool,
-    // `[`
     pub title_begin_delim: String,
     pub title: Vec<Inline>,
     pub continuation: Option<InlineLinkContinuation>,
 }
 
 pub struct InlineLinkContinuation {
-    // `]`
     pub title_end_delim: String,
     pub address: Option<InlineLinkAddress>,
 }
 
 pub struct InlineLinkAddress {
-    // `(`
     pub begin_delim: String,
     pub address: String,
-    // `)`
     pub end_delim: String,
 }
 

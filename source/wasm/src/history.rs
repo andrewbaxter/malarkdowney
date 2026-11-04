@@ -59,9 +59,10 @@ impl History {
         *self = History::new(lines, sel);
     }
 
-    pub fn begin(&mut self, sel: Option<SelPos>) {
+    /// Marks the start of a step; `sel` is only evaluated for the first edit of a step.
+    pub fn begin(&mut self, sel: impl FnOnce() -> Option<SelPos>) {
         if self.pending_sel_before.is_none() {
-            self.pending_sel_before = sel;
+            self.pending_sel_before = sel();
         }
     }
 
@@ -142,8 +143,8 @@ mod tests {
         let mut h = History::new(lines(&["a"]), sel(0, 1));
         assert!(!h.can_undo());
         assert!(!h.record(lines(&["a"]), sel(0, 1)), "unchanged isn't a step");
-        h.begin(sel(0, 1));
-        h.begin(sel(0, 5));
+        h.begin(|| sel(0, 1));
+        h.begin(|| sel(0, 5));
         assert!(h.record(lines(&["ab"]), sel(0, 2)));
         assert!(h.record(lines(&["ab", "c"]), sel(1, 1)));
         let r = h.undo().unwrap();

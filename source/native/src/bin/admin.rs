@@ -73,7 +73,6 @@ async fn copy(from: &Path, to: &Path) -> Result<(), loga::Error> {
     return Ok(());
 }
 
-/// `dest` is created and then the entries of `source` are put in `dest`.
 async fn recursive_copy(source: &Path, dest: &Path) -> Result<(), loga::Error> {
     ensure_dirs(&dest).await?;
     for entry in read_dir(source).await? {
@@ -215,8 +214,6 @@ async fn build_web_static(log: &Log, root_dir: &Path, stage_dir: &Path, debug: b
     return Ok(static_dir);
 }
 
-/// Explicitly capturing async closure - clones elements in the second parens into
-/// the closure. Anything else will be moved.
 #[macro_export]
 macro_rules! cap_fn{
     (($($a: pat_param), *)($($cap: ident), *) {

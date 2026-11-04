@@ -126,34 +126,27 @@ pub fn scan(
     let mut at = start.clone();
     loop {
         loop {
-            // Advance
             if skip_advance_once {
                 skip_advance_once = false;
             } else {
                 let Some(at_temp) = fn_advance(&at) else {
-                    // (move up)
                     break;
                 };
                 at = at_temp;
             }
 
-            // Match or move down
             loop {
-                // Match
                 if match_predicate(&at) {
                     return Some(at);
                 }
 
-                // Or move down
                 let Some(at_temp) = fn_descend(&at) else {
-                    // (no children, try advancing again)
                     break;
                 };
                 at = at_temp;
             }
         }
 
-        // Move up
         {
             let Some(at_temp) = at.parent_node() else {
                 return None;

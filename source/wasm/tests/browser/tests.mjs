@@ -1,5 +1,5 @@
 const eq = (a, b, msg) => { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error(`${msg || "mismatch"}: got ${JSON.stringify(a)} want ${JSON.stringify(b)}`); };
-const DEB = 450; // > 200ms debounce
+const DEB = 450; // > the 200ms typing pause after which edits are committed (history, change event)
 
 export default async (test, { ev, key, type, sleep, s }) => {
   await test("utf16: typing after multibyte text doesn't crash or misplace caret", async () => {
@@ -314,7 +314,8 @@ export default async (test, { ev, key, type, sleep, s }) => {
 
   await test("undo: structure (lists, quotes, code) is restored", async () => {
     await ev(`mk("")`);
-    for (const l of ["* a", "> q"]) { await type(l); await key("Enter"); }
+    // (Enter continues a block with a generated prefix; backspace over it to leave)
+    for (const l of ["* a", "> q"]) { await type(l); await key("Enter"); await key("Backspace"); await key("Backspace"); }
     await sleep(DEB);
     await type("```");
     await sleep(DEB);
@@ -393,13 +394,15 @@ export default async (test, { ev, key, type, sleep, s }) => {
   });
 
   await test("typing into nested structures (smoke)", async () => {
+    // Enter continues the enclosing block with a generated prefix; backspacing over it leaves
     await ev(`mk("")`);
-    for (const l of ["> quote *b*", "> * item", ">    more", "1. one", "2. two _e_", "```", "code * x", "```", "## h2 [l](http://x)"]) {
+    for (const [backspaces, l] of [[0, "> quote *b*"], [0, "* item"], [0, "more"], [4, "1. one"], [3, "2. two _e_"], [3, "```"], [0, "code * x"], [0, "```"], [0, "## h2 [l](http://x)"]]) {
+      for (let i = 0; i < backspaces; i++) await key("Backspace");
       await type(l);
       await key("Enter");
     }
     await sleep(DEB);
-    eq(await ev("md.getText(ed).split('\\n').filter(x => x.trim() !== '' && x.trim() !== '>')"), ["> quote *b*", "> * item", ">    more", "1. one", "2. two _e_", "```", "code * x", "```", "## h2 [l](http://x)"]);
+    eq(await ev("md.getText(ed).split('\\n').filter(x => x.trim() !== '' && x.trim() !== '>')"), ["> quote *b*", "> * item", ">   more", "1. one", "2. two _e_", "```", "code * x", "```", "## h2 [l](http://x)"]);
     eq(await ev("errors"), []);
   });
 
@@ -518,9 +521,21 @@ export default async (test, { ev, key, type, sleep, s }) => {
     await sleep(DEB);
     eq(await ev("md.getText(ed)"), "> a\n>\n> b", "typed after the prefix");
     await key("Enter");
-    await type("c"); // before the pause: no prefix generated yet, the line leaves the quote
+    await type("c"); // prefix is generated before the next keystroke regardless of typing speed
     await sleep(DEB);
-    eq(await ev("md.getText(ed)"), "> a\n>\n> b\n\nc");
+    eq(await ev("md.getText(ed)"), "> a\n>\n> b\n>\n> c");
+    await key("Enter");
+    await key("Backspace");
+    await key("Backspace"); // deleting the generated prefix leaves the block (no regeneration)
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "> a\n>\n> b\n>\n> c\n\n", "empty line after the quote");
+    await type("d");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "> a\n>\n> b\n>\n> c\n\nd");
+    await ev("caretAt(0)");
+    await key("Enter"); // new line above the first: no context, plain
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "\n> a\n>\n> b\n>\n> c\n\nd", "Enter at the start");
 
     await ev(`mk("* a")`);
     await sleep(DEB);
@@ -568,6 +583,59 @@ export default async (test, { ev, key, type, sleep, s }) => {
     const { result } = await s("Runtime.evaluate", { expression: "ro" });
     const { listeners } = await s("DOMDebugger.getEventListeners", { objectId: result.objectId, depth: -1 });
     eq(listeners.map(l => l.type), [], "event listeners");
+    eq(await ev("errors"), []);
+  });
+
+  // Restyling happens as the browser reports each edit; only history/change events wait for a pause
+  const frames = () => ev("new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)))");
+  const prefixesAligned = () => ev(`[...ed.querySelectorAll('.malarkdowney_aligned')].every(a => {
+    const block = a.closest('[malarkdowney_id="' + a.getAttribute('malarkdowney_indent_id') + '"]');
+    const inner = a.firstElementChild.getBoundingClientRect();
+    return Math.abs(inner.left - block.getBoundingClientRect().left) < 1 && inner.width <= parseFloat(getComputedStyle(block).paddingLeft) + 0.5;
+  })`);
+
+  await test("restyle: inline style appears immediately, change event only after the pause", async () => {
+    await ev(`mk(""); window.changes = 0; ed.addEventListener("malarkdowney-change", () => window.changes++)`);
+    await type("_a_");
+    eq(await ev("!!ed.querySelector('em')"), true, "styled before the pause");
+    eq(await ev("changes"), 0, "not committed yet");
+    await sleep(DEB);
+    eq(await ev("changes"), 1, "committed after the pause");
+    eq(await ev("errors"), []);
+  });
+
+  await test("restyle: prefixes stay aligned before the commit (widening, new list line)", async () => {
+    await ev(`mk("9. a")`);
+    await sleep(DEB);
+    eq(await prefixesAligned(), true, "initial");
+    await ev("caretAt(0)");
+    await type("1");
+    await frames();
+    eq(await ev("ed.querySelector('.malarkdowney_aligned').textContent"), "19. ", "prefix widened");
+    eq(await prefixesAligned(), true, "wider prefix aligned before commit");
+    await ev("caretAt(5)");
+    await key("Enter");
+    await type("b");
+    await frames();
+    eq(await ev("ed.querySelectorAll('.malarkdowney_aligned').length"), 2, "continuation prefix added");
+    eq(await prefixesAligned(), true, "new line aligned before commit");
+    await sleep(DEB);
+    eq(await prefixesAligned(), true, "after commit");
+    eq(await ev("md.getText(ed)"), "19. a\n\n    b");
+    eq(await ev("errors"), []);
+  });
+
+  await test("ime: composition is left alone until it ends", async () => {
+    await ev(`mk("")`);
+    await s("Input.imeSetComposition", { text: "*a*", selectionStart: 3, selectionEnd: 3 });
+    await frames();
+    eq(await ev("[!!ed.querySelector('strong'), ed.textContent]"), [false, "*a*"], "not restyled during composition");
+    await s("Input.insertText", { text: "*a*" });
+    await frames();
+    eq(await ev("!!ed.querySelector('strong')"), true, "restyled after composition");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "*a*");
+    eq((await ev("caretInfo()")).anchor, 3, "caret");
     eq(await ev("errors"), []);
   });
 };
