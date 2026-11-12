@@ -638,4 +638,131 @@ export default async (test, { ev, key, type, sleep, s }) => {
     eq((await ev("caretInfo()")).anchor, 3, "caret");
     eq(await ev("errors"), []);
   });
+
+  const CHAT = `{ prefixes: [{ kind: "mention", prefix: "@", chars: "_.-" }, { kind: "tag", prefix: "#" }], delimiters: [{ kind: "spoiler", open: "||" }, { kind: "tpl", open: "{{", close: "}}" }] }`;
+
+  await test("ast: editor loading matches the pure structurer, AST round trip is exact", async () => {
+    await ev(`mk("", ${CHAT})`);
+    const bad = await ev(`(() => {
+      const syn = ${CHAT};
+      const tokens = ["a", " ", "*", "_", "> ", "* ", "- ", "1. ", "12. ", "\`\`\`", "~~~", "||", "{{", "}}", "\\n", "\\n\\n", "  ", "   ", "@b", "#", "# ", "\`"];
+      let seed = 1;
+      const rand = (n) => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed % n; };
+      const docs = ["* > a\\n* > b", "* \`\`\`\\n* x", "> * a\\n>\\n>   b\\n\\nc", "\`\`\`js\\n~~~\\n\`\`\`\\nx", "1. a\\n\\n   * b\\n\\n     c"];
+      for (let i = 0; i < 400; i++) { let d = ""; for (let j = rand(10); j >= 0; j--) d += tokens[rand(tokens.length)]; docs.push(d); }
+      const out = [];
+      for (const doc of docs) {
+        md.setText(ed, doc);
+        const text = md.getText(ed);
+        const pure = md.testPureExport(doc);
+        if (text !== pure) { out.push({ doc, text, pure }); continue; }
+        const shape1 = JSON.stringify(shape(ed));
+        md.setText(ed, text);
+        if (md.getText(ed) !== text || JSON.stringify(shape(ed)) !== shape1) out.push({ doc, text, reloaded: md.getText(ed) });
+        const ast = JSON.stringify(md.getAst(ed));
+        if (ast !== JSON.stringify(md.textToAst(md.astToText(md.getAst(ed), syn), syn))) out.push({ doc, ast });
+      }
+      return out;
+    })()`);
+    eq(bad.slice(0, 3), [], "mismatches");
+    eq(await ev("errors"), []);
+  });
+
+  await test("ast: typed structure matches loading the same text", async () => {
+    await ev(`mk("", ${CHAT})`);
+    for (const line of ["* a", "> q", "* b", "1. c", "```js", "x", "```", "# h @bob ||s||"]) {
+      await type(line);
+      await key("Enter");
+    }
+    await type("end");
+    await sleep(DEB);
+    const text = await ev("md.getText(ed)");
+    const typed = await ev("JSON.stringify(shape(ed))");
+    const loaded = await ev(`(() => { const r = md.buildReadonly(md.getText(ed), ${CHAT}); return JSON.stringify(shape(r)); })()`);
+    eq(typed, loaded, `structure of ${JSON.stringify(text)}`);
+    eq(await ev(`md.astToText(md.getAst(ed), ${CHAT})`), text, "ast round trip");
+    eq(await ev("errors"), []);
+  });
+
+  await test("custom prefixes: rendered as tokens, updated while typing", async () => {
+    await ev(`mk("hi @bob and #general.", ${CHAT})`);
+    eq(await ev(`[...ed.querySelectorAll(".malarkdowney_inline_prefixed")].map(e => [e.getAttribute("malarkdowney_custom"), e.getAttribute("malarkdowney_custom_value"), e.textContent, e.classList.contains("malarkdowney_custom_" + e.getAttribute("malarkdowney_custom"))])`),
+      [["mention", "bob", "@bob", true], ["tag", "general", "#general", true]]);
+    eq(await ev("md.getText(ed)"), "hi @bob and #general.");
+    await ev(`mk("", ${CHAT})`);
+    await type("email a@b.c, ping @al");
+    await sleep(DEB);
+    await type("ice_");
+    await frames();
+    eq(await ev(`[...ed.querySelectorAll(".malarkdowney_inline_prefixed")].map(e => e.textContent)`), ["@alice"], "token grows, trailing _ excluded");
+    eq((await ev("caretInfo()")).anchor, "email a@b.c, ping @alice_".length, "caret");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "email a@b.c, ping @alice_");
+    eq(await ev("md.getAst(ed)"), [{ type: "paragraph", children: [{ type: "text", text: "email a@b.c, ping " }, { type: "prefixed", kind: "mention", value: "alice" }, { type: "text", text: "_" }] }]);
+    eq(await ev("errors"), []);
+  });
+
+  await test("custom delimiters: rendered as spans with nested formatting, incomplete while typing", async () => {
+    await ev(`mk("a ||secret *b*|| c {{x}} ||open", ${CHAT})`);
+    eq(await ev(`[...ed.querySelectorAll(".malarkdowney_inline_delimited")].map(e => [e.getAttribute("malarkdowney_custom"), e.classList.contains("malarkdowney_custom_" + e.getAttribute("malarkdowney_custom")), e.classList.contains("malarkdowney_incomplete"), !!e.querySelector("strong"), e.textContent])`), [
+      ["spoiler", true, false, true, "||secret *b*||"],
+      ["tpl", true, false, false, "{{x}}"],
+      ["spoiler", true, true, false, "||open"],
+    ]);
+    await ev(`mk("", ${CHAT})`);
+    await type("hi ||x");
+    await frames();
+    eq(await ev("ed.querySelector('.malarkdowney_inline_delimited').classList.contains('malarkdowney_incomplete')"), true, "unclosed");
+    await type("||");
+    await frames();
+    eq(await ev("ed.querySelector('.malarkdowney_inline_delimited').classList.contains('malarkdowney_incomplete')"), false, "closed");
+    eq((await ev("caretInfo()")).anchor, "hi ||x||".length, "caret");
+    await sleep(DEB);
+    eq(await ev("md.getAst(ed)"), [{ type: "paragraph", children: [{ type: "text", text: "hi " }, { type: "delimited", kind: "spoiler", children: [{ type: "text", text: "x" }] }] }]);
+    eq(await ev("errors"), []);
+  });
+
+  await test("code blocks: info attribute follows the opening line", async () => {
+    await ev(`mk("\`\`\`mermaid\\nx\\n\`\`\`\\nafter")`);
+    eq(await ev("shape(ed)"), [{ block: "code", info: "mermaid", children: ["codeline:\`\`\`mermaid", "codeline:x", "codeline:\`\`\`"] }, "p:after"]);
+    await ev("caretAt(10)");
+    await type(" x");
+    await frames();
+    eq(await ev("ed.querySelector('.malarkdowney_block_code').getAttribute('malarkdowney_code_info')"), "mermaid x", "info updated");
+    await ev("caretAt(3, 12)");
+    await key("Backspace");
+    await frames();
+    eq(await ev("ed.querySelector('.malarkdowney_block_code').hasAttribute('malarkdowney_code_info')"), false, "info removed");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "\`\`\`\nx\n\`\`\`\nafter");
+    eq(await ev("errors"), []);
+  });
+
+  await test("ast api: build/buildReadonly from an AST, getAst/setAst, invalid input throws", async () => {
+    const ast = [
+      { type: "heading", level: 2, children: ["Hi ", { type: "prefixed", kind: "mention", value: "bob" }, " ", { type: "delimited", kind: "spoiler", children: ["s"] }] },
+      { type: "list", items: [{ children: [{ type: "paragraph", children: [{ type: "strong", children: ["x"] }, " *y*"] }] }] },
+      { type: "code", info: "js", lines: ["a", ""] },
+    ];
+    await ev(`mk(${JSON.stringify(ast)}, ${CHAT})`);
+    eq(await ev("md.getText(ed)"), "## Hi @bob ||s||\n\n* *x* \\*y\\*\n```js\na\n\n```");
+    eq(await ev("md.getAst(ed)"), [
+      { type: "heading", level: 2, children: [{ type: "text", text: "Hi " }, { type: "prefixed", kind: "mention", value: "bob" }, { type: "text", text: " " }, { type: "delimited", kind: "spoiler", children: [{ type: "text", text: "s" }] }] },
+      { type: "list", ordered: false, items: [{ marker: "*", children: [{ type: "paragraph", children: [{ type: "strong", children: [{ type: "text", text: "x" }] }, { type: "text", text: " *y*" }] }] }] },
+      { type: "code", info: "js", lines: ["a", ""], closed: true },
+    ]);
+    await ev("window.changes = 0; ed.addEventListener('malarkdowney-change', () => changes++)");
+    await ev(`md.setAst(ed, [{ type: "quote", children: [{ type: "paragraph", children: ["> q"] }] }])`);
+    eq(await ev("[md.getText(ed), changes, !!ed.querySelector('.malarkdowney_block_quote')]"), ["> \\> q", 1, true]);
+    eq(await ev(`(() => { const r = md.buildReadonly(${JSON.stringify(ast)}, ${CHAT}); return [!!r.querySelector('h2 .malarkdowney_custom_mention'), r.querySelector('.malarkdowney_block_code').getAttribute('malarkdowney_code_info')]; })()`), [true, "js"]);
+    eq(await ev(`md.textToAst("@bob")`), [{ type: "paragraph", children: [{ type: "text", text: "@bob" }] }], "no prefixes by default");
+    const throws = async (expr) => ev(`(() => { try { ${expr}; return null; } catch (e) { return e instanceof TypeError; } })()`);
+    eq(await throws(`md.build("", { prefixes: [{ kind: "x", prefix: "*" }] })`), true, "reserved prefix");
+    eq(await throws(`md.build("", { delimiters: [{ kind: "x", open: "**" }] })`), true, "reserved delimiter");
+    eq(await throws(`md.build("", { prefixes: [{ kind: "x", prefix: "|" }], delimiters: [{ kind: "y", open: "||" }] })`), true, "delimiter overlaps prefix");
+    eq(await throws(`md.setAst(ed, [{ type: "nope" }])`), true, "bad block");
+    eq(await throws(`md.astToText([{ type: "heading", level: 7, children: [] }])`), true, "bad level");
+    eq(await ev("md.getText(ed)"), "> \\> q", "unchanged after a failed setAst");
+    eq(await ev("errors"), []);
+  });
 };

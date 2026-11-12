@@ -14,15 +14,15 @@ use {
 };
 
 pub enum ShadowDom {
-    Text(String),
     Element(ShadowDomElement),
+    Text(String),
 }
 
 pub struct ShadowDomElement {
-    pub tag: &'static str,
-    pub classes: HashSet<String>,
     pub attrs: HashMap<String, String>,
     pub children: Vec<ShadowDom>,
+    pub classes: HashSet<String>,
+    pub tag: &'static str,
 }
 
 pub fn sync_shadow_dom(changed: &mut bool, have: &Node, want: ShadowDom) -> Node {
@@ -64,7 +64,6 @@ pub fn sync_shadow_dom(changed: &mut bool, have: &Node, want: ShadowDom) -> Node
                 replace(changed, have, &have1);
                 break have1;
             });
-
             {
                 let mut remove_attrs = vec![];
                 for k in have.get_attribute_names() {
@@ -89,7 +88,6 @@ pub fn sync_shadow_dom(changed: &mut bool, have: &Node, want: ShadowDom) -> Node
                     _ = have.set_attribute(&k, &v);
                 }
             }
-
             let classes = have.class_list();
             {
                 let mut remove_classes = vec![];
@@ -112,7 +110,6 @@ pub fn sync_shadow_dom(changed: &mut bool, have: &Node, want: ShadowDom) -> Node
                     _ = classes.add_1(&k);
                 }
             }
-
             let have_children = have.child_nodes();
             let have_children_len = have_children.length() as usize;
             let mut want_children_iter = want.children.into_iter();

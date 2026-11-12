@@ -8,9 +8,9 @@ await init();
 window.md = md;
 window.errors = [];
 window.addEventListener("error", e => window.errors.push(String(e.message)));
-window.mk = (text) => {
+window.mk = (text, options) => {
   document.querySelectorAll(".malarkdowney_root").forEach(e => e.remove());
-  const e = md.build(text);
+  const e = md.build(text, options);
   document.body.appendChild(e);
   e.focus();
   window.ed = e;
@@ -28,5 +28,9 @@ window.caretAt = (off, focusOff) => {
   getSelection().setBaseAndExtent(a, ao, f, fo);
 };
 window.caretInfo = () => { const s = getSelection(); const r = document.createRange(); r.setStart(window.ed, 0); r.setEnd(s.anchorNode, s.anchorOffset); return {anchor: r.toString().length, collapsed: s.isCollapsed, text: s.toString()}; };
+// Block/line structure of an editor element, for comparing editors
+window.shape = (el) => [...el.children].map(c => c.classList.contains("malarkdowney_block")
+  ? { block: c.getAttribute("malarkdowney_block_type"), info: c.getAttribute("malarkdowney_code_info"), children: shape(c) }
+  : c.tagName.toLowerCase() + ":" + c.textContent);
 window.ready = true;
 </script></body></html>

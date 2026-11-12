@@ -1,33 +1,33 @@
 use {
     aargvark::{
-        vark,
         Aargvark,
+        vark,
     },
     flowcontrol::ta_return,
     futures::FutureExt,
     http::Response,
     htwrap::htserve::{
-        self,
+        Body,
         async_trait::async_trait,
         response_404,
         response_503,
-        Body,
+        self,
     },
     loga::{
-        ea,
-        fatal,
         DebugDisplay,
         ErrContext,
         Log,
         ResultContext,
+        ea,
+        fatal,
     },
     serde::Deserialize,
     std::{
         env,
         io::{
-            stdout,
             Cursor,
             Write,
+            stdout,
         },
         path::{
             Path,
@@ -39,8 +39,8 @@ use {
     taskmanager::TaskManager,
     tokio::{
         fs::{
-            remove_dir_all,
             DirEntry,
+            remove_dir_all,
         },
         net::TcpListener,
         process::Command,
@@ -48,67 +48,20 @@ use {
     tokio_stream::wrappers::TcpListenerStream,
 };
 
-async fn read_dir(path: &Path) -> Result<Vec<DirEntry>, loga::Error> {
-    let mut out = vec![];
-    let mut reader =
-        tokio::fs::read_dir(path).await.context_with("Error reading directory", ea!(path = path.dbg_str()))?;
-    while let Some(e) =
-        reader.next_entry().await.context_with("Error reading directory entry", ea!(path = path.dbg_str()))? {
-        out.push(e);
-    }
-    return Ok(out);
-}
-
-async fn ensure_dirs(path: &Path) -> Result<(), loga::Error> {
-    tokio::fs::create_dir_all(path)
-        .await
-        .context_with("Error ensuring directory chain", ea!(path = path.dbg_str()))?;
-    return Ok(());
-}
-
-async fn copy(from: &Path, to: &Path) -> Result<(), loga::Error> {
-    tokio::fs::copy(from, to)
-        .await
-        .context_with("Error copying file", ea!(from = from.dbg_str(), to = to.dbg_str()))?;
-    return Ok(());
-}
-
-async fn recursive_copy(source: &Path, dest: &Path) -> Result<(), loga::Error> {
-    ensure_dirs(&dest).await?;
-    for entry in read_dir(source).await? {
-        let ty = entry.file_type().await?;
-        if ty.is_dir() {
-            recursive_copy(&entry.path(), &dest.join(entry.file_name())).boxed_local().await?;
-        } else {
-            copy(&entry.path(), &dest.join(entry.file_name())).await?;
+#[macro_export]
+macro_rules! cap_fn{
+    (($($a: pat_param), *)($($cap: ident), *) {
+        $($t: tt) *
+    }) => {
+        {
+            $(let $cap = $cap.clone();) * move | $($a),
+            *| {
+                $(let $cap = $cap.clone();) * async move {
+                    $($t) *
+                }
+            }
         }
-    }
-    Ok(())
-}
-
-struct SimpleCommand<'a>(&'a mut Command);
-
-impl<'a> SimpleCommand<'a> {
-    async fn run(self) -> Result<(), loga::Error> {
-        let log = Log::new().fork(ea!(command = self.0.dbg_str()));
-        let o =
-            self
-                .0
-                .spawn()
-                .stack_context(&log, "Failed to start child process")?
-                .wait_with_output()
-                .await
-                .stack_context(&log, "Failed to wait for child process to exit")?;
-        if !o.status.success() {
-            return Err(
-                log.err_with(
-                    "Child process exited with error",
-                    ea!(code = o.status.code().dbg_str(), output = o.dbg_str()),
-                ),
-            );
-        }
-        return Ok(());
-    }
+    };
 }
 
 trait SimpleCommandExt {
@@ -121,56 +74,10 @@ impl SimpleCommandExt for Command {
     }
 }
 
-async fn command_cargo_build(log: &Log, command: &mut Command) -> Result<Vec<PathBuf>, loga::Error> {
-    log.log_with(loga::INFO, "Building rust exe", ea!(command = command.dbg_str()));
-    command.arg("--message-format=json").stdout(Stdio::piped());
-
-    #[derive(Deserialize)]
-    struct CargoLineMessage {
-        level: String,
-        rendered: String,
-    }
-
-    #[derive(Deserialize)]
-    struct CargoLine {
-        message: Option<CargoLineMessage>,
-        executable: Option<String>,
-    }
-
-    let p = command.spawn().context_with("Failed to spawn cargo build", ea!(command = command.dbg_str()))?;
-    let p =
-        p
-            .wait_with_output()
-            .await
-            .context_with("Error waiting for cargo build to complete", ea!(command = command.dbg_str()))?;
-    let mut failed = false;
-    let mut out = vec![];
-    for line in std::io::BufRead::lines(Cursor::new(p.stdout)) {
-        let line = match (move || -> Result<CargoLine, loga::Error> {
-            let line = line?;
-            let line = serde_json::from_str::<CargoLine>(&line)?;
-            return Ok(line);
-        })() {
-            Ok(l) => l,
-            Err(e) => {
-                log.log_err(loga::WARN, e);
-                continue;
-            },
-        };
-        if let Some(m) = line.message {
-            if m.level == "error" {
-                failed = true;
-                eprint!("{}", m.rendered);
-            }
-        }
-        if let Some(exe) = line.executable {
-            out.push(PathBuf::from(&exe));
-        }
-    }
-    if failed {
-        return Err(log.err("Build failed with errors"));
-    }
-    return Ok(out);
+#[derive(Aargvark)]
+enum ArgCommand {
+    Build,
+    DevServer,
 }
 
 async fn build_web_static(log: &Log, root_dir: &Path, stage_dir: &Path, debug: bool) -> Result<PathBuf, loga::Error> {
@@ -214,26 +121,70 @@ async fn build_web_static(log: &Log, root_dir: &Path, stage_dir: &Path, debug: b
     return Ok(static_dir);
 }
 
-#[macro_export]
-macro_rules! cap_fn{
-    (($($a: pat_param), *)($($cap: ident), *) {
-        $($t: tt) *
-    }) => {
-        {
-            $(let $cap = $cap.clone();) * move | $($a),
-            *| {
-                $(let $cap = $cap.clone();) * async move {
-                    $($t) *
-                }
+async fn command_cargo_build(log: &Log, command: &mut Command) -> Result<Vec<PathBuf>, loga::Error> {
+    log.log_with(loga::INFO, "Building rust exe", ea!(command = command.dbg_str()));
+    command.arg("--message-format=json").stdout(Stdio::piped());
+
+    #[derive(Deserialize)]
+    struct CargoLineMessage {
+        level: String,
+        rendered: String,
+    }
+
+    #[derive(Deserialize)]
+    struct CargoLine {
+        executable: Option<String>,
+        message: Option<CargoLineMessage>,
+    }
+
+    let p = command.spawn().context_with("Failed to spawn cargo build", ea!(command = command.dbg_str()))?;
+    let p =
+        p
+            .wait_with_output()
+            .await
+            .context_with("Error waiting for cargo build to complete", ea!(command = command.dbg_str()))?;
+    let mut failed = false;
+    let mut out = vec![];
+    for line in std::io::BufRead::lines(Cursor::new(p.stdout)) {
+        let line = match (move || -> Result<CargoLine, loga::Error> {
+            let line = line?;
+            let line = serde_json::from_str::<CargoLine>(&line)?;
+            return Ok(line);
+        })() {
+            Ok(l) => l,
+            Err(e) => {
+                log.log_err(loga::WARN, e);
+                continue;
+            },
+        };
+        if let Some(m) = line.message {
+            if m.level == "error" {
+                failed = true;
+                eprint!("{}", m.rendered);
             }
         }
-    };
+        if let Some(exe) = line.executable {
+            out.push(PathBuf::from(&exe));
+        }
+    }
+    if failed {
+        return Err(log.err("Build failed with errors"));
+    }
+    return Ok(out);
 }
 
-#[derive(Aargvark)]
-enum ArgCommand {
-    Build,
-    DevServer,
+async fn copy(from: &Path, to: &Path) -> Result<(), loga::Error> {
+    tokio::fs::copy(from, to)
+        .await
+        .context_with("Error copying file", ea!(from = from.dbg_str(), to = to.dbg_str()))?;
+    return Ok(());
+}
+
+async fn ensure_dirs(path: &Path) -> Result<(), loga::Error> {
+    tokio::fs::create_dir_all(path)
+        .await
+        .context_with("Error ensuring directory chain", ea!(path = path.dbg_str()))?;
+    return Ok(());
 }
 
 #[tokio::main]
@@ -318,5 +269,54 @@ async fn main() {
         Err(e) => {
             fatal(e);
         },
+    }
+}
+
+async fn read_dir(path: &Path) -> Result<Vec<DirEntry>, loga::Error> {
+    let mut out = vec![];
+    let mut reader =
+        tokio::fs::read_dir(path).await.context_with("Error reading directory", ea!(path = path.dbg_str()))?;
+    while let Some(e) =
+        reader.next_entry().await.context_with("Error reading directory entry", ea!(path = path.dbg_str()))? {
+        out.push(e);
+    }
+    return Ok(out);
+}
+
+async fn recursive_copy(source: &Path, dest: &Path) -> Result<(), loga::Error> {
+    ensure_dirs(&dest).await?;
+    for entry in read_dir(source).await? {
+        let ty = entry.file_type().await?;
+        if ty.is_dir() {
+            recursive_copy(&entry.path(), &dest.join(entry.file_name())).boxed_local().await?;
+        } else {
+            copy(&entry.path(), &dest.join(entry.file_name())).await?;
+        }
+    }
+    Ok(())
+}
+
+struct SimpleCommand<'a>(&'a mut Command);
+
+impl<'a> SimpleCommand<'a> {
+    async fn run(self) -> Result<(), loga::Error> {
+        let log = Log::new().fork(ea!(command = self.0.dbg_str()));
+        let o =
+            self
+                .0
+                .spawn()
+                .stack_context(&log, "Failed to start child process")?
+                .wait_with_output()
+                .await
+                .stack_context(&log, "Failed to wait for child process to exit")?;
+        if !o.status.success() {
+            return Err(
+                log.err_with(
+                    "Child process exited with error",
+                    ea!(code = o.status.code().dbg_str(), output = o.dbg_str()),
+                ),
+            );
+        }
+        return Ok(());
     }
 }

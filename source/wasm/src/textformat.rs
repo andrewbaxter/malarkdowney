@@ -1,17 +1,105 @@
-#[derive(Clone, Debug)]
-pub struct ExportBlock {
-    pub id: usize,
-    pub quote: bool,
-    pub prefix_len: usize,
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(lines: &[ExportLine], want: &str) {
+        let got = export_lines(lines);
+        assert_eq!(got, want);
+        let want_lines: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(import_lines(&got), want_lines, "import of {:?}", got);
+    }
+
+    #[test]
+    fn code() {
+        check(
+            &[
+                line("a", false, &[]),
+                line("```", true, &[]),
+                line("x", true, &[]),
+                line("", true, &[]),
+                line("y", true, &[]),
+                line("```", true, &[]),
+                line("", false, &[]),
+                line("b", false, &[]),
+            ],
+            "a\n```\nx\n\ny\n```\n\nb",
+        );
+        check(&[line("* ```", true, &[(1, false, 2)]), line("  ", true, &[(1, false, 2)])], "* ```\n  ");
+    }
+
+    #[test]
+    fn empty_list_item() {
+        check(&[line("* ", false, &[(1, false, 2)]), line("  ", false, &[(1, false, 2)])], "* \n  ");
+        check(&[line("> * ", false, &[(1, true, 2), (2, false, 2)]), line("b", false, &[])], "> * \nb");
+        check(&[line("*  ", false, &[(1, false, 2)]), line("  ", false, &[(1, false, 2)])], "*  \n\n  ");
+    }
+
+    #[test]
+    fn import_code_blank_lines() {
+        assert_eq!(import_lines("```\na\n\n~~~\n```\n\nc"), vec!["```", "a", "", "~~~", "```", "", "c"]);
+    }
+
+    #[test]
+    fn import_external() {
+        assert_eq!(import_lines("a\n"), vec!["a"]);
+        assert_eq!(import_lines("a\r\n\r\nb\r\n"), vec!["a", "b"]);
+        assert_eq!(import_lines(""), vec![""]);
+    }
+
+    fn line(text: &str, code: bool, blocks: &[(usize, bool, usize)]) -> ExportLine {
+        let prefix: usize = blocks.iter().map(|b| b.2).sum();
+        return ExportLine {
+            text: text.to_string(),
+            code: code,
+            content_empty: text.chars().count() <= prefix,
+            blocks: blocks.iter().map(|(id, quote, prefix_len)| ExportBlock {
+                id: *id,
+                quote: *quote,
+                prefix_len: *prefix_len,
+            }).collect(),
+        };
+    }
+
+    #[test]
+    fn paragraphs() {
+        check(&[line("a", false, &[]), line("b", false, &[])], "a\n\nb");
+        check(&[line("a", false, &[]), line("", false, &[]), line("b", false, &[])], "a\n\n\nb");
+        check(
+            &[line("a", false, &[]), line("", false, &[]), line("", false, &[]), line("b", false, &[])],
+            "a\n\n\n\nb",
+        );
+        check(&[line("a", false, &[]), line("", false, &[])], "a\n\n");
+    }
+
+    #[test]
+    fn quotes() {
+        let q = (1, true, 2);
+        check(&[line("> a", false, &[q]), line("> b", false, &[q])], "> a\n>\n> b");
+        check(
+            &[line("> a", false, &[q]), line("> ", false, &[q]), line("> b", false, &[q])],
+            "> a\n>\n> \n> b",
+        );
+        check(&[line("> a", false, &[q]), line("b", false, &[])], "> a\n\nb");
+        check(
+            &[line("> * a", false, &[q, (2, false, 2)]), line(">    b", false, &[q, (2, false, 3)])],
+            "> * a\n>\n>    b",
+        );
+        check(
+            &[
+                line("* > a", false, &[(3, false, 2), (4, true, 2)]),
+                line("  > b", false, &[(3, false, 2), (4, true, 2)]),
+            ],
+            "* > a\n  >\n  > b",
+        );
+    }
 }
 
-#[derive(Clone, Debug)]
-pub struct ExportLine {
-    pub text: String,
-    pub code: bool,
-    pub content_empty: bool,
-    pub blocks: Vec<ExportBlock>,
-}
+use crate::{
+    ast::{
+        Leaf,
+        Structurer,
+    },
+};
 
 pub fn export_lines(lines: &[ExportLine]) -> String {
     let mut out = String::new();
@@ -51,131 +139,39 @@ pub fn export_lines(lines: &[ExportLine]) -> String {
     return out;
 }
 
+#[derive(Clone, Debug)]
+pub struct ExportBlock {
+    pub id: usize,
+    pub prefix_len: usize,
+    pub quote: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct ExportLine {
+    pub blocks: Vec<ExportBlock>,
+    pub code: bool,
+    pub content_empty: bool,
+    pub text: String,
+}
+
 pub fn import_lines(text: &str) -> Vec<String> {
     let mut out = vec![];
-    let mut in_code = false;
+    let mut structurer = Structurer::default();
     let mut prev_droppable = false;
     for line in text.split('\n') {
         let line = line.strip_suffix('\r').unwrap_or(line);
-        let fence = {
-            let mut at = line;
-            loop {
-                let trimmed = at.trim_start_matches(|c: char| c == '>' || c.is_whitespace());
-                let trimmed =
-                    if let Some(rest) = trimmed.strip_prefix("* ").or_else(|| trimmed.strip_prefix("- ")) {
-                        rest
-                    } else {
-                        let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
-                        if digits > 0 && trimmed[digits..].starts_with(". ") {
-                            &trimmed[digits + 2..]
-                        } else {
-                            trimmed
-                        }
-                    };
-                if trimmed.len() == at.len() {
-                    break;
-                }
-                at = trimmed;
-            }
-            at.starts_with("```")
+        let matched = structurer.match_next(line);
+        let (code, content_empty) = match &matched.leaf {
+            Leaf::Text(t) => (false, t.is_empty()),
+            Leaf::Code { .. } => (true, false),
         };
-        let code = in_code || fence;
-        if fence {
-            in_code = !in_code;
+        if !code && prev_droppable && line.chars().all(|c| c == '>' || c.is_whitespace()) {
+            prev_droppable = false;
+            continue;
         }
-        if !code && line.chars().all(|c| c == '>' || c.is_whitespace()) {
-            if prev_droppable {
-                prev_droppable = false;
-                continue;
-            }
-        } else {
-            prev_droppable = !code;
-        }
+        prev_droppable = !code && !content_empty;
+        structurer.advance(matched);
         out.push(line.to_string());
     }
     return out;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn line(text: &str, code: bool, blocks: &[(usize, bool, usize)]) -> ExportLine {
-        let prefix: usize = blocks.iter().map(|b| b.2).sum();
-        return ExportLine {
-            text: text.to_string(),
-            code: code,
-            content_empty: text.chars().count() <= prefix,
-            blocks: blocks.iter().map(|(id, quote, prefix_len)| ExportBlock {
-                id: *id,
-                quote: *quote,
-                prefix_len: *prefix_len,
-            }).collect(),
-        };
-    }
-
-    fn check(lines: &[ExportLine], want: &str) {
-        let got = export_lines(lines);
-        assert_eq!(got, want);
-        let want_lines: Vec<String> = lines.iter().map(|l| l.text.clone()).collect();
-        assert_eq!(import_lines(&got), want_lines, "import of {:?}", got);
-    }
-
-    #[test]
-    fn paragraphs() {
-        check(&[line("a", false, &[]), line("b", false, &[])], "a\n\nb");
-        check(&[line("a", false, &[]), line("", false, &[]), line("b", false, &[])], "a\n\n\nb");
-        check(
-            &[line("a", false, &[]), line("", false, &[]), line("", false, &[]), line("b", false, &[])],
-            "a\n\n\n\nb",
-        );
-        check(&[line("a", false, &[]), line("", false, &[])], "a\n\n");
-    }
-
-    #[test]
-    fn quotes() {
-        let q = (1, true, 2);
-        check(&[line("> a", false, &[q]), line("> b", false, &[q])], "> a\n>\n> b");
-        check(
-            &[line("> a", false, &[q]), line("> ", false, &[q]), line("> b", false, &[q])],
-            "> a\n>\n> \n> b",
-        );
-        check(&[line("> a", false, &[q]), line("b", false, &[])], "> a\n\nb");
-        check(
-            &[line("> * a", false, &[q, (2, false, 2)]), line(">    b", false, &[q, (2, false, 3)])],
-            "> * a\n>\n>    b",
-        );
-        check(
-            &[
-                line("* > a", false, &[(3, false, 2), (4, true, 2)]),
-                line("  > b", false, &[(3, false, 2), (4, true, 2)]),
-            ],
-            "* > a\n  >\n  > b",
-        );
-    }
-
-    #[test]
-    fn code() {
-        check(
-            &[
-                line("a", false, &[]),
-                line("```", true, &[]),
-                line("x", true, &[]),
-                line("", true, &[]),
-                line("y", true, &[]),
-                line("```", true, &[]),
-                line("", false, &[]),
-                line("b", false, &[]),
-            ],
-            "a\n```\nx\n\ny\n```\n\nb",
-        );
-        check(&[line("* ```", true, &[(1, false, 2)]), line("  ", true, &[(1, false, 2)])], "* ```\n  ");
-    }
-
-    #[test]
-    fn import_external() {
-        assert_eq!(import_lines("a\n"), vec!["a"]);
-        assert_eq!(import_lines("a\r\n\r\nb\r\n"), vec!["a", "b"]);
-        assert_eq!(import_lines(""), vec![""]);
-    }
 }

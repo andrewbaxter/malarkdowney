@@ -22,13 +22,19 @@ Do `cargo add malarkdowney`
 
   - `newline_on_enter: bool` - Default `true`. When `false` Enter doesn't insert a newline (Shift+Enter still does), so you can handle Enter (e.g. to submit) with a normal `keydown` listener.
 
-- `build_readonly(markdown_text: &str) -> rooting::El` - Renders the markdown as a non-editable block, with no event listeners and no editor state.
+  - `syntax: Syntax` - Custom prefixes and delimiters, see [Custom syntax](#custom-syntax).
+
+- `build_readonly(markdown_text: &str, syntax: &Syntax) -> rooting::El` - Renders the markdown as a non-editable block, with no event listeners and no editor state.
+
+- `ast::text_to_ast(markdown_text: &str, syntax: &Syntax) -> Vec<ast::Block>`, `ast::ast_to_text(blocks: &[ast::Block], syntax: &Syntax) -> String` - See [AST](#ast).
 
 `Editor` methods:
 
 - `get_text()` - Returns the markdown text from the block.
 
 - `set_text(markdown_text: &str)` - Replaces the text in the block (clears history).
+
+- `get_ast()`, `set_ast(blocks: &[ast::Block])` - Same as `get_text`/`set_text` but with an AST.
 
 - `undo()`, `redo()` - Undo/redo the last change, returns whether there was anything to undo/redo.
 
@@ -50,23 +56,59 @@ Currently you can build the npm package (wasm, package.json, typescript definiti
 
 In Javascript the editor is the element itself - everything is garbage collected along with it:
 
-- `build(markdownText: string)` - Returns an `Element`, the editable markdown text block.
+- `build(markdown: string | Block[], options?: Options)` - Returns an `Element`, the editable markdown text block.
 
   `options` (optional):
 
   - `newlineOnEnter?: boolean` - Default `true`. When `false` Enter doesn't insert a newline (Shift+Enter still does), so you can handle Enter (e.g. to submit) with a normal `keydown` listener.
 
-- `buildReadonly(markdownText: string)` - Returns an `Element`, the markdown rendered as a non-editable block, with no event listeners and no editor state.
+  - `prefixes?: Prefix[]`, `delimiters?: Delimiter[]` - See [Custom syntax](#custom-syntax).
+
+- `buildReadonly(markdown: string | Block[], syntax?: Syntax)` - Returns an `Element`, the markdown rendered as a non-editable block, with no event listeners and no editor state.
+
+- `textToAst(markdownText: string, syntax?: Syntax): Block[]`, `astToText(blocks: Block[], syntax?: Syntax): string` - See [AST](#ast).
 
 - `getText(element: Element)` - Returns the markdown text from the block.
 
 - `setText(element: Element, markdownText: string)` - Replaces the text in the block (clears history).
+
+- `getAst(element: Element)`, `setAst(element: Element, blocks: Block[])` - Same as `getText`/`setText` but with an AST.
+
+Invalid options or ASTs throw a `TypeError`.
 
 - `undo(element: Element)`, `redo(element: Element)` - Undo/redo the last change, returns whether there was anything to undo/redo.
 
 - `canUndo(element: Element)`, `canRedo(element: Element)`
 
 - `insertText(element: Element, text: string)` - Replaces the selection with the text (one undo step), or appends it if the selection isn't in the editor.
+
+# Custom syntax
+
+`Syntax` (Rust: `Syntax::default().with_prefix(...)?.with_delimiter(...)?`, Typescript: an object with these properties):
+
+- `prefixes` - Inline tokens like `@user` or `#channel`: `{kind: "mention", prefix: "@", chars: "_.-"}`. The prefix is one ASCII punctuation character other than ``\ * _ ~ ` [ ] ( )``. The body is letters, digits and the characters in `chars`, and ends with a letter or digit (so `@xyz.` is `@xyz` then `.`). A prefix after a letter or digit isn't a token (`a@b.com`), and `\@` escapes it.
+
+  Tokens are rendered as `<span class="malarkdowney_inline_prefixed malarkdowney_custom_<kind>" malarkdowney_custom="<kind>" malarkdowney_custom_value="<body>">`.
+
+- `delimiters` - Inline spans like `||spoiler||`: `{kind: "spoiler", open: "||"}` (`close` defaults to `open`, e.g. `{kind: "tpl", open: "{{", close: "}}"}`). Delimiters are ASCII punctuation other than the reserved characters above and the prefixes. They work like `*bold*`: the content can contain other formatting, the opening delimiter must be followed by a non-space and the closing one preceded by one, and unclosed spans are plain text.
+
+  Spans are rendered as `<span class="malarkdowney_inline_delimited malarkdowney_custom_<kind>" malarkdowney_custom="<kind>">` (plus `malarkdowney_incomplete` while unclosed).
+
+Code blocks have a `malarkdowney_code_info` attribute with the text after the opening ```` ``` ```` (if any), so e.g. `[malarkdowney_code_info~="mermaid"]` can style them.
+
+# AST
+
+`textToAst`/`astToText` convert between text and an AST of blocks and inline content (see `Block` and `Inline` in the Typescript definitions, or the `ast` module). The editor and the AST conversion share the same parsing, so `getAst` is `textToAst(getText())` and `setAst` is `setText(astToText())`.
+
+- Each editor line is a block: a paragraph is one line.
+
+- Text in the AST is unescaped, and unclosed formatting (e.g. `*a`) is plain text. `astToText` escapes text only where needed.
+
+- `textToAst(astToText(ast))` gives back the same AST, if the AST came from `textToAst`. Other ASTs may be normalized: adjacent quotes or lists are merged, an empty paragraph right after a quote or list becomes part of it, newlines in text become spaces, and structures markdown can't express (e.g. bold text starting with a space) become plain text.
+
+- `astToText(textToAst(text))` keeps the structure, but inline syntax may be spelled differently (e.g. an unnecessary escape is dropped, code span delimiters are shortened).
+
+- In Typescript, inline children can be plain strings on input (`["Hi ", {type: "prefixed", kind: "mention", value: "bob"}]`). Missing list item markers are filled in and a missing code `closed` is `true`.
 
 # Embedding
 
