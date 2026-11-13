@@ -765,4 +765,74 @@ export default async (test, { ev, key, type, sleep, s }) => {
     eq(await ev("md.getText(ed)"), "> \\> q", "unchanged after a failed setAst");
     eq(await ev("errors"), []);
   });
+
+  const tokenInfo = `(() => { const t = md.getCaretToken(ed); return t && [t.kind, t.prefix, t.value, t.rect.width > 0 && t.rect.height > 0]; })()`;
+
+  await test("caret token: found while typing, including a bare prefix, event on change", async () => {
+    await ev(`mk("", ${CHAT})`);
+    await ev("window.tokens = []; ed.addEventListener('malarkdowney-token', e => tokens.push(e.detail && [e.detail.kind, e.detail.value]))");
+    await type("hi ");
+    eq(await ev(tokenInfo), null, "no token");
+    await type("@");
+    eq(await ev(tokenInfo), ["mention", "@", "", true], "bare prefix");
+    await type("bo");
+    eq(await ev(tokenInfo), ["mention", "@", "bo", true], "typing");
+    await type(".");
+    eq(await ev(tokenInfo), ["mention", "@", "bo.", true], "trailing body char while typing");
+    await key("Backspace");
+    await key("ArrowLeft");
+    eq(await ev(tokenInfo), ["mention", "@", "bo", true], "mid token");
+    await type(" ");
+    await frames();
+    eq(await ev(tokenInfo), null, "split by a space");
+    await ev("caretAt(5)");
+    await frames();
+    eq(await ev(tokenInfo), ["mention", "@", "b", true], "caret moved");
+    await ev("caretAt(0)");
+    await frames();
+    eq(await ev(tokenInfo), null, "caret moved away");
+    eq(await ev("tokens"), [["mention", ""], ["mention", "b"], ["mention", "bo"], ["mention", "bo."], ["mention", "bo"], null, ["mention", "b"], null], "events");
+    eq(await ev("errors"), []);
+  });
+
+  await test("caret token: not in code, not with a selection, not without prefixes, ok in blocks", async () => {
+    await ev(`mk("\`@a\` x\\n\\n\`\`\`\\n@b\\n\`\`\`\\n\\n* > #gen", ${CHAT})`);
+    await ev("caretAt(3)");
+    eq(await ev(tokenInfo), null, "code span");
+    await ev("caretAt(9)");
+    eq(await ev(tokenInfo), null, "code block");
+    await ev("caretAt(md.getText(ed).length)");
+    eq(await ev(tokenInfo), ["tag", "#", "gen", true], "in list > quote");
+    await ev("caretAt(texts().map(t => t.length).reduce((a, b) => a + b) - 2, texts().map(t => t.length).reduce((a, b) => a + b))");
+    eq(await ev(tokenInfo), null, "selection");
+    await ev(`mk("@bob")`);
+    await ev("caretAt(4)");
+    eq(await ev(tokenInfo), null, "no prefixes configured");
+    eq(await ev("errors"), []);
+  });
+
+  await test("caret token: replace is one undo step and leaves the caret after it", async () => {
+    await ev(`mk("", ${CHAT})`);
+    await type("> hi @b");
+    await sleep(DEB);
+    await type("o");
+    eq(await ev(`md.replaceCaretToken(ed, "@bob ")`), true);
+    eq(await ev("md.getText(ed)"), "> hi @bob ");
+    eq((await ev("caretInfo()")).anchor, "> hi @bob ".length, "caret");
+    eq(await ev(tokenInfo), null, "after replace");
+    await type("x");
+    await sleep(DEB);
+    eq(await ev("md.getText(ed)"), "> hi @bob x");
+    eq(await ev("md.undo(ed)"), true);
+    eq(await ev("md.getText(ed)"), "> hi @bob ", "undo typing");
+    eq(await ev("md.undo(ed)"), true);
+    eq(await ev("md.getText(ed)"), "> hi @bo", "undo replace");
+    await ev("caretAt(1)");
+    eq(await ev(`md.replaceCaretToken(ed, "x")`), false, "no token");
+    eq(await ev("md.getText(ed)"), "> hi @bo");
+    await ev("caretAt(md.getText(ed).length - 1)");
+    eq(await ev(`md.replaceCaretToken(ed, "@bobby")`), true, "mid token replaces all of it");
+    eq(await ev("md.getText(ed)"), "> hi @bobby");
+    eq(await ev("errors"), []);
+  });
 };

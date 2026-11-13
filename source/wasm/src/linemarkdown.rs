@@ -88,6 +88,45 @@ mod tests {
     }
 
     #[test]
+    fn prefix_at_caret() {
+        let syntax = chat_syntax();
+        let at = |text: &str| {
+            let caret = text.find('^').unwrap();
+            let text = text.replace('^', "");
+            let caret = text[..caret].chars().count();
+            return prefix_at(&text, caret, &syntax).map(|p| (p.kind, p.value, p.start, p.end));
+        };
+        let m =
+            |value: &str, start: usize, end: usize| Some(("mention".to_string(), value.to_string(), start, end));
+        assert_eq!(at("hi @bo^"), m("bo", 3, 6));
+        assert_eq!(at("hi @b^ob x"), m("bob", 3, 7));
+        assert_eq!(at("hi @^bob"), m("bob", 3, 7));
+        assert_eq!(at("hi ^@bob"), None);
+        assert_eq!(at("hi @bob ^"), None);
+        assert_eq!(at("@^"), m("", 0, 1));
+        assert_eq!(at("hi @^"), m("", 3, 4));
+        assert_eq!(at("@a.^"), m("a.", 0, 3));
+        assert_eq!(at("@a.^b"), m("a.b", 0, 4));
+        assert_eq!(at("@bob^."), m("bob", 0, 4));
+        assert_eq!(at("é @é^"), m("é", 2, 4));
+        assert_eq!(at("*@a^*"), m("a", 1, 3));
+        assert_eq!(at("[@^"), m("", 1, 2));
+        assert_eq!(at("||x @y^||"), m("y", 4, 6));
+        assert_eq!(at("||x @y||^"), None);
+        assert_eq!(at("#gen^"), Some(("tag".to_string(), "gen".to_string(), 0, 4)));
+        assert_eq!(at("a@^"), None);
+        assert_eq!(at("a@b^"), None);
+        assert_eq!(at("\\@^"), None);
+        assert_eq!(at("\\@a^"), None);
+        assert_eq!(at("\\\\@^"), m("", 2, 3));
+        assert_eq!(at("`@^"), None);
+        assert_eq!(at("`@a^`"), None);
+        assert_eq!(at("[x](@a^"), None);
+        assert_eq!(at("@ ^"), None);
+        assert_eq!(at("@@^"), m("", 1, 2));
+    }
+
+    #[test]
     fn round_trip_exhaustive() {
         let alphabet = ['*', '_', '~', '`', '[', ']', '(', ')', '\\', 'a', ' ', 'é', '@', '.', '|', '{', '}'];
         let syntax = chat_syntax();
@@ -261,6 +300,7 @@ pub struct InlineLinkContinuation {
 pub struct InlinePrefixed {
     pub kind: String,
     pub prefix: char,
+    pub start: usize,
     pub value: String,
 }
 
@@ -493,12 +533,14 @@ fn parse_inline(c: &mut Cursor, ends: &[String], syntax: &Syntax) -> Vec<Inline>
                         .filter(|(_, len)| *len > 0);
                 if let Some((prefix, len)) = custom {
                     flush(&mut children, &mut text);
+                    let start = c.i;
                     c.advance();
                     let value = c.chars[c.i .. c.i + len].iter().collect();
                     c.i += len;
                     children.push(Inline::Prefixed(InlinePrefixed {
                         kind: prefix.kind.clone(),
                         prefix: next,
+                        start: start,
                         value: value,
                     }));
                 } else {
@@ -508,6 +550,65 @@ fn parse_inline(c: &mut Cursor, ends: &[String], syntax: &Syntax) -> Vec<Inline>
             },
         }
     }
+}
+
+pub struct PrefixAt {
+    pub end: usize,
+    pub kind: String,
+    pub prefix: char,
+    pub start: usize,
+    pub value: String,
+}
+
+pub fn prefix_at(text: &str, caret: usize, syntax: &Syntax) -> Option<PrefixAt> {
+    fn find(inlines: Vec<Inline>, caret: usize) -> Option<InlinePrefixed> {
+        for i in inlines {
+            let found = match i {
+                Inline::Prefixed(p) => {
+                    if p.start < caret && caret <= p.start + 1 + p.value.chars().count() {
+                        return Some(p);
+                    }
+                    None
+                },
+                Inline::Strong(InlineStrong { children, .. }) |
+                Inline::Emphasis(InlineEmphasis { children, .. }) |
+                Inline::Strikethrough(InlineStrikethrough { children, .. }) |
+                Inline::Delimited(InlineDelimited { children, .. }) => find(
+                    children,
+                    caret,
+                ),
+                Inline::Link(link) => find(link.title, caret),
+                Inline::Code(_) | Inline::Text(_) => None,
+            };
+            if found.is_some() {
+                return found;
+            }
+        }
+        return None;
+    }
+
+    if let Some(p) = find(parse(text, syntax), caret) {
+        return Some(PrefixAt {
+            start: p.start,
+            end: p.start + 1 + p.value.chars().count(),
+            kind: p.kind,
+            prefix: p.prefix,
+            value: p.value,
+        });
+    }
+    let mut chars = text.chars().collect::<Vec<_>>();
+    if caret > chars.len() {
+        return None;
+    }
+    chars.insert(caret, 'a');
+    let p = find(parse(&chars.iter().collect::<String>(), syntax), caret + 1)?;
+    return Some(PrefixAt {
+        start: p.start,
+        end: caret,
+        kind: p.kind,
+        prefix: p.prefix,
+        value: chars[p.start + 1 .. caret].iter().collect(),
+    });
 }
 
 fn starts_with(c: &Cursor, delim: &str) -> bool {

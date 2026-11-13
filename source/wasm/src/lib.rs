@@ -131,6 +131,9 @@ use {
     },
     web_sys::{
         ClipboardEvent,
+        CustomEvent,
+        CustomEventInit,
+        DomRect,
         DragEvent,
         Element,
         Event,
@@ -142,6 +145,7 @@ use {
         MutationObserverInit,
         MutationRecord,
         Node,
+        Range,
         ResizeObserver,
         ResizeObserverEntry,
         console,
@@ -157,6 +161,7 @@ macro_rules! ns{
 thread_local!{
     static NEXT_ID: Cell<usize> = Cell::new(0);
     static FONT_LISTENER: Cell<bool> = Cell::new(false);
+    static SELECTION_LISTENER: Cell<bool> = Cell::new(false);
 }
 
 thread_local!{
@@ -206,6 +211,16 @@ export interface Syntax {
     prefixes?: Prefix[];
     /** Custom spans like `||spoiler||`. */
     delimiters?: Delimiter[];
+}
+export interface CaretToken {
+    /** The prefix's `kind`. */
+    kind: string;
+    /** The prefix character, e.g. `@`. */
+    prefix: string;
+    /** The body. While typing it can be empty (`@`) or end with a non-letter (`@a.`). */
+    value: string;
+    /** Bounds of the token text, including the prefix. */
+    rect: DOMRect;
 }
 export interface Options extends Syntax {
     /** Default true. When false, Enter doesn't insert a newline (Shift+Enter still does). */
@@ -278,6 +293,7 @@ fn attach(root: &Element, owner: Option<&El>, options: Options) -> Rc<EditorStat
         }),
         history: RefCell::new(History::new(raw_lines(&root), None)),
         prefix_widths: RefCell::new(None),
+        token: RefCell::new(None),
     });
     EDITORS.with(|e| e.borrow_mut().insert(id, Rc::downgrade(&editor_state)));
     _ = root.set_attribute(ATTR_EDITOR_ID, &id.to_string());
@@ -289,6 +305,7 @@ fn attach(root: &Element, owner: Option<&El>, options: Options) -> Rc<EditorStat
                 return;
             }
             restyle_pending(&editor_state);
+            update_tokens();
         }
     });
     let on_mutations = match owner {
@@ -574,6 +591,7 @@ fn attach(root: &Element, owner: Option<&El>, options: Options) -> Rc<EditorStat
         };
         state.pending.borrow_mut().composing = false;
         restyle_pending(&state);
+        update_tokens();
     });
     listen("beforeinput", |event| {
         let Some(root) = event_root(event) else {
@@ -614,6 +632,11 @@ fn attach(root: &Element, owner: Option<&El>, options: Options) -> Rc<EditorStat
         }));
     }
     observe_layout(&root, owner);
+    if !SELECTION_LISTENER.with(|x| x.replace(true)) {
+        let cb = Closure::<dyn Fn()>::new(update_tokens);
+        _ = document().add_event_listener_with_callback("selectionchange", cb.as_ref().unchecked_ref());
+        cb.forget();
+    }
     return editor_state;
 }
 
@@ -724,6 +747,13 @@ fn create_root(markdown_text: &str, editable: bool, syntax: &Syntax) -> Element 
     return root;
 }
 
+pub struct CaretToken {
+    pub kind: String,
+    pub prefix: char,
+    pub rect: DomRect,
+    pub value: String,
+}
+
 pub struct Editor {
     root: Element,
     state: Rc<EditorState>,
@@ -736,6 +766,16 @@ impl Editor {
 
     pub fn can_undo(&self) -> bool {
         return self.state.can_undo(&self.root);
+    }
+
+    pub fn caret_token(&self) -> Option<CaretToken> {
+        let found = self.state.caret_token(&self.root)?;
+        return Some(CaretToken {
+            rect: found.range.get_bounding_client_rect(),
+            kind: found.token.kind,
+            prefix: found.token.prefix,
+            value: found.token.value,
+        });
     }
 
     pub fn get_ast(&self) -> Vec<ast::Block> {
@@ -754,6 +794,10 @@ impl Editor {
 
     pub fn redo(&self) -> bool {
         return self.state.undo_redo(&self.root, false);
+    }
+
+    pub fn replace_caret_token(&self, text: &str) -> bool {
+        return self.state.replace_caret_token(&self.root, text);
     }
 
     pub fn set_ast(&self, blocks: &[ast::Block]) {
@@ -776,6 +820,7 @@ struct EditorState {
     pending: RefCell<PendingState>,
     prefix_widths: RefCell<Option<HashMap<usize, f64>>>,
     syntax: Syntax,
+    token: RefCell<Option<(usize, usize, String, String)>>,
 }
 
 impl EditorState {
@@ -791,6 +836,59 @@ impl EditorState {
     fn can_undo(self: &Rc<Self>, root: &Element) -> bool {
         self.flush(root);
         return self.history.borrow().can_undo();
+    }
+
+    fn caret_token(self: &Rc<Self>, root: &Element) -> Option<FoundToken> {
+        if !self.pending.borrow().composing {
+            if let Some(observer) = root_observer(root) {
+                queue_mutations(&mut self.pending.borrow_mut(), observer.take_records());
+            }
+            restyle_pending(self);
+        }
+        let sel = document().get_selection().ok()??;
+        if sel.range_count() == 0 || !sel.is_collapsed() {
+            return None;
+        }
+        let node = sel.focus_node()?;
+        if !root.contains(Some(&node)) {
+            return None;
+        }
+        let (line_index, line, caret) = all_lines(root).into_iter().enumerate().find_map(|(i, line)| {
+            let caret = dom::text_offset_in(&line, &node, sel.focus_offset())?;
+            return Some((i, line, caret));
+        })?;
+        let line_el = line.dyn_ref::<Element>()?;
+        if line_el.tag_name().eq_ignore_ascii_case("codeline") {
+            return None;
+        }
+        let mut prefix_len = 0;
+        let children = line_el.children();
+        for i in 0 .. children.length() {
+            if let Some(child) = children.item(i).filter(|c| c.has_attribute(ATTR_INDENT_ID)) {
+                prefix_len += dom::node_text_len(&child);
+            }
+        }
+        let caret = caret.checked_sub(prefix_len)?;
+        let mut text = String::new();
+        recurse_get_text(&line, &mut text);
+        let content = &text[dom::utf16_to_byte(&text, prefix_len)..];
+        let token =
+            linemarkdown::prefix_at(
+                content,
+                content[..dom::utf16_to_byte(content, caret)].chars().count(),
+                &self.syntax,
+            )?;
+        let range = document().create_range().ok()?;
+        let utf16_at = |chars: usize| prefix_len + content.chars().take(chars).map(char::len_utf16).sum::<usize>();
+        let (start_node, start_offset) = dom::locate_text_offset(&line, utf16_at(token.start));
+        range.set_start(&start_node, start_offset).ok()?;
+        let (end_node, end_offset) = dom::locate_text_offset(&line, utf16_at(token.end));
+        range.set_end(&end_node, end_offset).ok()?;
+        return Some(FoundToken {
+            line_index: line_index,
+            range: range,
+            token: token,
+        });
     }
 
     fn discard_pending(&self, root: &Element) {
@@ -907,6 +1005,19 @@ impl EditorState {
         self.flush(root);
     }
 
+    fn replace_caret_token(self: &Rc<Self>, root: &Element, text: &str) -> bool {
+        let Some(found) = self.caret_token(root) else {
+            return false;
+        };
+        let Ok(Some(sel)) = document().get_selection() else {
+            return false;
+        };
+        _ = sel.remove_all_ranges();
+        _ = sel.add_range(&found.range);
+        self.insert_text(root, text);
+        return true;
+    }
+
     fn set_text(self: &Rc<Self>, root: &Element, markdown_text: &str) {
         self.flush(root);
         load_text(root, markdown_text, &self.syntax);
@@ -1004,6 +1115,12 @@ fn flush(root: &Element) {
     }
 }
 
+struct FoundToken {
+    line_index: usize,
+    range: Range,
+    token: linemarkdown::PrefixAt,
+}
+
 fn generate_aligned(out_want_children: &mut Vec<ShadowDom>, indents: &[LineIndent]) {
     for indent in indents {
         if indent.prefix.is_empty() {
@@ -1035,6 +1152,11 @@ pub fn get_ast_js(root: &Element) -> JsValue {
         return Array::new().into();
     };
     return js::ast_to_js(&ast::text_to_ast(&state.get_text(root), &state.syntax));
+}
+
+#[wasm_bindgen(js_name = "getCaretToken", unchecked_return_type = "CaretToken | null")]
+pub fn get_caret_token_js(root: &Element) -> JsValue {
+    return lookup(root).and_then(|s| s.caret_token(root)).as_ref().map_or(JsValue::NULL, token_to_js);
 }
 
 #[wasm_bindgen(js_name = "getText")]
@@ -1697,6 +1819,11 @@ fn sel_pos(root: &Element) -> Option<SelPos> {
     });
 }
 
+#[wasm_bindgen(js_name = "replaceCaretToken")]
+pub fn replace_caret_token_js(root: &Element, text: &str) -> bool {
+    return lookup(root).map_or(false, |s| s.replace_caret_token(root, text));
+}
+
 #[wasm_bindgen(js_name = "setAst")]
 pub fn set_ast_js(
     root: &Element,
@@ -1725,6 +1852,66 @@ fn set_code_attrs(block: &Element, begin_text: &str) {
 pub fn set_text_js(root: &Element, markdown_text: &str) {
     if let Some(state) = lookup(root) {
         state.set_text(root, markdown_text);
+    }
+}
+
+fn token_to_js(found: &FoundToken) -> JsValue {
+    let out = Object::new();
+    for (
+        k,
+        v,
+    ) in [
+        ("kind", JsValue::from_str(&found.token.kind)),
+        ("prefix", JsValue::from_str(&found.token.prefix.to_string())),
+        ("value", JsValue::from_str(&found.token.value)),
+        ("rect", found.range.get_bounding_client_rect().into()),
+    ] {
+        _ = Reflect::set(&out, &JsValue::from_str(k), &v);
+    }
+    return out.into();
+}
+
+fn update_tokens() {
+    let mut roots = vec![];
+    let mut at = document().get_selection().ok().flatten().and_then(|s| s.focus_node());
+    while let Some(n) = at {
+        if let Some(e) = n.dyn_ref::<Element>() {
+            if e.class_list().contains(CLASS_ROOT) {
+                roots.push(e.clone());
+                break;
+            }
+        }
+        at = n.parent_node();
+    }
+    let with_token = EDITORS.with(|e| {
+        return e
+            .borrow()
+            .iter()
+            .filter(|(_, w)| w.upgrade().map_or(false, |s| s.token.borrow().is_some()))
+            .map(|(id, _)| *id)
+            .collect::<Vec<_>>();
+    });
+    for id in with_token {
+        if let Ok(Some(root)) = document().query_selector(&format!("[{}=\"{}\"]", ATTR_EDITOR_ID, id)) {
+            roots.push(root);
+        }
+    }
+    for root in roots {
+        let Some(state) = lookup(&root) else {
+            continue;
+        };
+        let found = state.caret_token(&root);
+        let key =
+            found.as_ref().map(|f| (f.line_index, f.token.start, f.token.kind.clone(), f.token.value.clone()));
+        if *state.token.borrow() == key {
+            continue;
+        }
+        *state.token.borrow_mut() = key;
+        let init = CustomEventInit::new();
+        init.set_detail(&found.as_ref().map_or(JsValue::NULL, token_to_js));
+        if let Ok(e) = CustomEvent::new_with_event_init_dict(ns!("-token"), &init) {
+            _ = root.dispatch_event(&e);
+        }
     }
 }
 
